@@ -74,3 +74,90 @@ def test_load_contacts_preserves_optional_case(tmp_path, monkeypatch):
     rendered_body = Template(body_template).render(**context)
     assert "Financeiro" in rendered_body
     assert "VIP" in rendered_body
+
+
+def test_send_messages_retries_temporary_errors(monkeypatch):
+    attempts: list[int] = []
+
+    class DummyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def send(self, message):
+            self.calls += 1
+            attempts.append(self.calls)
+            if self.calls < 4:
+                return sender_module.ResultadoEnvio(
+                    destinatario=message["To"],
+                    sucesso=False,
+                    erro="451 4.3.0 Temporary local problem",
+                )
+            return sender_module.ResultadoEnvio(
+                destinatario=message["To"], sucesso=True
+            )
+
+    class DummyLimiter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def acquire(self) -> None:
+            self.calls += 1
+
+    limiter = DummyLimiter()
+
+    monkeypatch.setattr(sender_module, "_get_rate_limiter", lambda: limiter)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(sender_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    results = sender_module.send_messages(
+        sender="sender@example.com",
+        contacts=[{"email": "user@example.com", "tratamento": "Sr.", "nome": "João"}],
+        subject_template="Olá {{ nome }}",
+        body_template="Olá {{ nome }}",
+        provider=DummyProvider(),
+        dry_run=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].sucesso is True
+    assert attempts == [1, 2, 3, 4]
+    assert sleeps == [1, 2, 4]
+    assert limiter.calls == 4
+
+
+def test_send_messages_does_not_retry_non_temporary_error(monkeypatch):
+    class DummyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def send(self, message):
+            self.calls += 1
+            return sender_module.ResultadoEnvio(
+                destinatario=message["To"],
+                sucesso=False,
+                erro="550 Permanent failure",
+            )
+
+    limiter_calls: list[int] = []
+
+    class DummyLimiter:
+        def acquire(self) -> None:
+            limiter_calls.append(1)
+
+    monkeypatch.setattr(sender_module, "_get_rate_limiter", lambda: DummyLimiter())
+    monkeypatch.setattr(sender_module.time, "sleep", lambda seconds: (_ for _ in ()).throw(AssertionError("sleep called")))
+
+    results = sender_module.send_messages(
+        sender="sender@example.com",
+        contacts=[{"email": "user@example.com", "tratamento": "Sr.", "nome": "João"}],
+        subject_template="Olá {{ nome }}",
+        body_template="Olá {{ nome }}",
+        provider=DummyProvider(),
+        dry_run=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].sucesso is False
+    assert results[0].erro == "550 Permanent failure"
+    assert limiter_calls == [1]
