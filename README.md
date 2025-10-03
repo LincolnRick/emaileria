@@ -41,11 +41,11 @@ Assunto de exemplo: `Plano funerário especial para {{ nome }}`.
 ```bash
 python email_sender.py leads.xlsx \
   --sender "seu-email@gmail.com" \
-  --subject-template "Plano funerário especial para {{ nome }}" \
-  --body-template "$(cat template.html)"
+  --subject-template-file template_assunto.txt \
+  --body-template-file template.html
 ```
 
-Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a senha de app). Você também pode informar as credenciais via linha de comando:
+Também é possível fornecer os conteúdos diretamente em linha, como no exemplo abaixo:
 
 ```bash
 python email_sender.py leads.xlsx \
@@ -56,13 +56,17 @@ python email_sender.py leads.xlsx \
   --body-template "$(cat template.html)"
 ```
 
-As mensagens são enviadas utilizando `smtplib.SMTP_SSL` diretamente contra `smtp.gmail.com:465`, portanto não é necessário configurar nenhum projeto no Google Cloud.
+Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a senha de app). Você também pode informar as credenciais via linha de comando, como mostrado acima. As mensagens são enviadas utilizando `smtplib.SMTP_SSL` diretamente contra `smtp.gmail.com:465`, portanto não é necessário configurar nenhum projeto no Google Cloud.
 
 ### Opções adicionais
 
 - `--sheet`: define o nome da aba da planilha (caso não seja a primeira).
 - `--smtp-user`: usuário SMTP a ser autenticado (por padrão é o mesmo informado em `--sender`).
 - `--smtp-password`: senha ou senha de app a ser utilizada (se omitido, será solicitado via prompt seguro).
+- `--subject-template`: template do assunto do e-mail.
+- `--subject-template-file`: caminho para um arquivo contendo o template do assunto (sobrescreve `--subject-template`).
+- `--body-template`: template do corpo do e-mail (HTML).
+- `--body-template-file`: caminho para um arquivo contendo o template do corpo (sobrescreve `--body-template`).
 - `--dry-run`: apenas renderiza as mensagens sem enviá-las.
 - `--log-level`: ajusta o nível de log (padrão: `INFO`).
 
@@ -70,6 +74,25 @@ As mensagens são enviadas utilizando `smtplib.SMTP_SSL` diretamente contra `smt
 
 - Prefira utilizar senhas de app em vez da senha principal da conta Gmail.
 - Guarde a planilha com os dados sensíveis em local seguro.
+
+## Gerando executável
+
+1. Crie (ou reutilize) um ambiente virtual e instale as dependências de execução e de build:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   pip install -r requirements-build.txt
+   ```
+
+2. Execute o script de build:
+
+   ```bash
+   ./scripts/build_executable.sh
+   ```
+
+O binário gerado ficará disponível em `dist/emaileria` (ou `dist/emaileria.exe` no Windows).
 
 ## Licença
 

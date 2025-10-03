@@ -95,6 +95,11 @@ def send_messages(
     return sent_to
 
 
+def read_template_file(path: Path) -> str:
+    """Read a template file as UTF-8 text."""
+    return path.read_text(encoding="utf-8")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send Gmail messages from an Excel contact list.")
     parser.add_argument("excel", type=Path, help="Path to the Excel file containing contacts.")
@@ -108,8 +113,26 @@ def parse_args() -> argparse.Namespace:
         "--smtp-password",
         help="SMTP password or app password. If omitted, it will be requested via prompt.",
     )
-    parser.add_argument("--subject-template", required=True, help="Template for the email subject. Jinja2 placeholders are allowed.")
-    parser.add_argument("--body-template", required=True, help="Template for the HTML body. Jinja2 placeholders are allowed.")
+    parser.add_argument(
+        "--subject-template",
+        required=True,
+        help="Template for the email subject. Jinja2 placeholders are allowed.",
+    )
+    parser.add_argument(
+        "--subject-template-file",
+        type=Path,
+        help="Path to a file containing the subject template. Overrides --subject-template when provided.",
+    )
+    parser.add_argument(
+        "--body-template",
+        required=True,
+        help="Template for the HTML body. Jinja2 placeholders are allowed.",
+    )
+    parser.add_argument(
+        "--body-template-file",
+        type=Path,
+        help="Path to a file containing the body template. Overrides --body-template when provided.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Render messages without sending them.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR).")
     return parser.parse_args()
@@ -118,6 +141,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s: %(message)s")
+
+    subject_template = (
+        read_template_file(args.subject_template_file)
+        if args.subject_template_file
+        else args.subject_template
+    )
+    body_template = (
+        read_template_file(args.body_template_file)
+        if args.body_template_file
+        else args.body_template
+    )
 
     contacts_df = load_contacts(args.excel, args.sheet)
     contacts_records = contacts_df.to_dict(orient="records")
@@ -129,8 +163,8 @@ def main() -> None:
             smtp=None,
             sender=args.sender,
             contacts=contacts_records,
-            subject_template=args.subject_template,
-            body_template=args.body_template,
+            subject_template=subject_template,
+            body_template=body_template,
             dry_run=True,
         )
         return
@@ -146,8 +180,8 @@ def main() -> None:
             smtp=smtp,
             sender=args.sender,
             contacts=contacts_records,
-            subject_template=args.subject_template,
-            body_template=args.body_template,
+            subject_template=subject_template,
+            body_template=body_template,
             dry_run=False,
         )
 
