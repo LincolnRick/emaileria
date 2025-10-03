@@ -14,6 +14,23 @@ Ferramenta de linha de comando para enviar e-mails personalizados via Gmail a pa
    pip install -r requirements.txt
    ```
 
+## Como configurar .env
+
+1. Copie o arquivo `.env.example` para `.env` na raiz do projeto.
+2. Preencha as variáveis com as credenciais e remetente desejado.
+3. Garanta que `RATE_LIMIT_PER_MINUTE` reflita o limite máximo de envios por minuto aceito pelo seu provedor SMTP.
+
+As variáveis padrão estão configuradas para uso com servidores SMTP do Gmail via SSL (`smtp.gmail.com:465`).
+
+## Como formatar
+
+Para aplicar as ferramentas de lint e formatação configuradas no projeto, execute:
+
+```bash
+ruff check .
+black .
+```
+
 ## Preparando a planilha
 
 A planilha deve conter, pelo menos, as seguintes colunas (sem distinção entre maiúsculas/minúsculas):
