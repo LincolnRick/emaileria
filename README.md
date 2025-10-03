@@ -87,6 +87,45 @@ Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a se
 - `--dry-run`: apenas renderiza as mensagens sem enviá-las.
 - `--log-level`: ajusta o nível de log (padrão: `INFO`).
 
+## Interface gráfica (GUI)
+
+Instale dependências (incluindo PySimpleGUI):
+
+```bash
+pip install -r requirements.txt
+```
+
+Rode a interface:
+
+```bash
+python gui.py
+```
+
+Preencha os campos e clique Enviar.
+O log mostrará exatamente o que email_sender.py está fazendo (suporta --dry-run).
+
+### Gerar executável com PyInstaller
+
+**Windows**
+
+```bash
+pyinstaller --onefile --noconsole gui.py
+```
+
+Saída: `dist/gui.exe`
+
+Ícone opcional: `--icon assets/emaileria.ico`
+
+**macOS (Intel/ARM)**
+
+```bash
+pyinstaller --onefile --windowed gui.py
+```
+
+Saída: `dist/gui`
+
+Dica: templates HTML podem ficar numa pasta `templates/` ao lado do executável. Como o `gui.py` lê o arquivo escolhido pelo usuário, não é obrigatório empacotar assets.
+
 ## Segurança
 
 - Prefira utilizar senhas de app em vez da senha principal da conta Gmail.
