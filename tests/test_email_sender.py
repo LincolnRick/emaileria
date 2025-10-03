@@ -6,7 +6,8 @@ from jinja2 import Template
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import email_sender
+from emaileria.datasource.excel import load_contacts
+import emaileria.sender as sender_module
 
 
 def test_load_contacts_preserves_optional_case(tmp_path, monkeypatch):
@@ -22,14 +23,15 @@ def test_load_contacts_preserves_optional_case(tmp_path, monkeypatch):
         ]
     )
     excel_path = tmp_path / "contacts.xlsx"
+
     def fake_read_excel(path, sheet_name=None):
         assert path == excel_path
         assert sheet_name is None
         return contacts.copy()
 
-    monkeypatch.setattr(email_sender.pd, "read_excel", fake_read_excel)
+    monkeypatch.setattr(pd, "read_excel", fake_read_excel)
 
-    loaded = email_sender.load_contacts(excel_path)
+    loaded = load_contacts(excel_path)
 
     assert set(loaded.columns) == {
         "email",
@@ -41,17 +43,18 @@ def test_load_contacts_preserves_optional_case(tmp_path, monkeypatch):
 
     contexts = []
 
-    def render_with_capture(template: str, context):
+    def render_with_capture(subject_template: str, body_template: str, context):
         contexts.append(dict(context))
-        return Template(template).render(**context)
+        return Template(subject_template).render(**context), Template(body_template).render(
+            **context
+        )
 
-    monkeypatch.setattr(email_sender, "render_template", render_with_capture)
+    monkeypatch.setattr(sender_module, "render", render_with_capture)
 
     subject_template = "{{ tratamento }} {{ nome }} - {{ DEPARTAMENTO }}"
     body_template = "Olá {{ tratamento }} {{ nome }}, setor: {{ DEPARTAMENTO }} ({{ InfoExtra }})"
 
-    email_sender.send_messages(
-        smtp=None,
+    sender_module.send_messages(
         sender="sender@example.com",
         contacts=loaded.to_dict(orient="records"),
         subject_template=subject_template,
