@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 from .providers.base import EmailProvider, ResultadoEnvio
-from .templating import render
+from .templating import TemplateRenderingError, render
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +199,31 @@ def send_messages(
 
     results: List[ResultadoEnvio] = []
 
-    for row in contacts:
-        context = _prepare_context(row)
-        subject, body = render(subject_template, body_template, context)
+    for index, row in enumerate(contacts, start=1):
+        row_position = index
+        if isinstance(row, dict):
+            if "__row_position__" in row:
+                row_position = row.get("__row_position__", index)
+                row_data = {k: v for k, v in row.items() if k != "__row_position__"}
+            else:
+                row_data = dict(row)
+        else:
+            row_data = dict(row)
+
+        context = _prepare_context(row_data)
+
+        try:
+            subject, body = render(subject_template, body_template, context)
+        except TemplateRenderingError as exc:
+            logger.error(
+                "Falha ao renderizar %s na linha %s: placeholder '%s' não encontrado. "
+                "Adicione a coluna correspondente na planilha ou ajuste o template.",
+                exc.template_type,
+                row_position,
+                exc.placeholder,
+            )
+            raise SystemExit(1) from exc
+
         logger.info("Prepared email to %s with subject '%s'", context["email"], subject)
 
         if dry_run or provider is None:
