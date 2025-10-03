@@ -3,17 +3,134 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as _dt
 import getpass
 import html
 import logging
+import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 from . import config
 from .datasource.excel import load_contacts
 from .providers.smtp import SMTPProvider
-from .sender import _prepare_context, send_messages
+from .sender import ResultadoEnvio, _prepare_context, send_messages
 from .templating import TemplateRenderingError, render
+
+_BASE_DIR = Path(__file__).resolve().parents[1]
+_LOG_DIR = _BASE_DIR / "logs"
+_CSV_LOG_PATH = _LOG_DIR / "envios.csv"
+_SQLITE_LOG_PATH = _LOG_DIR / "emaileria.db"
+_CSV_HEADERS = ["timestamp", "email", "assunto", "status", "tentativas", "erro"]
+
+
+def _ensure_logs_dir() -> None:
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _append_to_csv(rows: Iterable[dict[str, object]]) -> None:
+    _ensure_logs_dir()
+    file_exists = _CSV_LOG_PATH.exists()
+    with _CSV_LOG_PATH.open("a", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=_CSV_HEADERS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def _append_to_sqlite(rows: Iterable[dict[str, object]]) -> None:
+    if not rows:
+        return
+
+    _ensure_logs_dir()
+
+    try:
+        connection = sqlite3.connect(_SQLITE_LOG_PATH)
+    except sqlite3.Error as exc:  # pragma: no cover - file permission issues
+        logging.warning("Não foi possível abrir o banco de dados de logs: %s", exc)
+        return
+
+    with connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS envios (
+                timestamp TEXT NOT NULL,
+                email TEXT NOT NULL,
+                assunto TEXT,
+                status TEXT NOT NULL,
+                tentativas INTEGER NOT NULL,
+                erro TEXT
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO envios (timestamp, email, assunto, status, tentativas, erro)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["timestamp"],
+                    row["email"],
+                    row.get("assunto"),
+                    row["status"],
+                    int(row["tentativas"]),
+                    row.get("erro"),
+                )
+                for row in rows
+            ],
+        )
+
+
+def _persist_results(results: Iterable[ResultadoEnvio]) -> None:
+    rows: list[dict[str, object]] = []
+    for result in results:
+        timestamp = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        rows.append(
+            {
+                "timestamp": timestamp,
+                "email": result.destinatario,
+                "assunto": result.assunto or "",
+                "status": "sent" if result.sucesso else "failed",
+                "tentativas": result.tentativas,
+                "erro": result.erro or "",
+            }
+        )
+
+    if not rows:
+        return
+
+    _append_to_csv(rows)
+    _append_to_sqlite(rows)
+
+
+def _generate_report(since: _dt.date, output_path: Path) -> int:
+    if not _CSV_LOG_PATH.exists():
+        raise FileNotFoundError("Log CSV não encontrado.")
+
+    filtered_rows: list[dict[str, str]] = []
+    with _CSV_LOG_PATH.open("r", encoding="utf-8", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            timestamp_str = row.get("timestamp")
+            if not timestamp_str:
+                continue
+            try:
+                timestamp = _dt.datetime.fromisoformat(timestamp_str)
+            except ValueError:
+                logging.debug("Ignorando linha com timestamp inválido: %s", timestamp_str)
+                continue
+            if timestamp.date() >= since:
+                filtered_rows.append(row)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=_CSV_HEADERS)
+        writer.writeheader()
+        writer.writerows(filtered_rows)
+
+    return len(filtered_rows)
 
 
 def _read_template(template: str | None, template_file: Path | None) -> str:
@@ -73,6 +190,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)."
+    )
+    parser.add_argument(
+        "--report-since",
+        help="Data inicial (YYYY-MM-DD) para geração de relatório a partir do log de envios.",
+    )
+    parser.add_argument(
+        "--report-out",
+        type=Path,
+        help="Arquivo CSV de saída para o relatório gerado com --report-since.",
     )
     return parser
 
@@ -316,6 +442,30 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s: %(message)s")
 
+    if args.report_since:
+        if not args.report_out:
+            logging.error("--report-out é obrigatório quando --report-since é utilizado.")
+            raise SystemExit(1)
+        try:
+            since_date = _dt.datetime.strptime(args.report_since, "%Y-%m-%d").date()
+        except ValueError as exc:
+            logging.error("--report-since deve estar no formato YYYY-MM-DD.")
+            raise SystemExit(1) from exc
+
+        try:
+            generated_rows = _generate_report(since_date, args.report_out)
+        except FileNotFoundError as exc:
+            logging.error(
+                "Nenhum log encontrado em %s. Realize envios antes de gerar relatórios.",
+                _CSV_LOG_PATH,
+            )
+            raise SystemExit(1) from exc
+
+        logging.info(
+            "Relatório gerado em %s com %s linha(s).", args.report_out, generated_rows
+        )
+        return
+
     subject_template = _read_template(args.subject_template, args.subject_template_file)
     body_template = _read_template(args.body_template, args.body_template_file)
 
@@ -351,13 +501,14 @@ def main(argv: list[str] | None = None) -> None:
     smtp_user = args.smtp_user or args.sender
 
     if args.dry_run:
-        send_messages(
+        results = send_messages(
             sender=args.sender,
             contacts=sampled_records,
             subject_template=subject_template,
             body_template=body_template,
             dry_run=True,
         )
+        logging.debug("Resultados de dry-run: %s", results)
         logging.info(
             "Pré-visualizados %s de %s registros (offset=%s, limit=%s)",
             processed_count,
@@ -384,7 +535,7 @@ def main(argv: list[str] | None = None) -> None:
         smtp_password,
         timeout=config.SMTP_TIMEOUT,
     ) as provider:
-        send_messages(
+        results = send_messages(
             sender=args.sender,
             contacts=sampled_records,
             subject_template=subject_template,
@@ -392,3 +543,4 @@ def main(argv: list[str] | None = None) -> None:
             provider=provider,
             dry_run=False,
         )
+    _persist_results(results)

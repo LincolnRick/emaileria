@@ -15,6 +15,8 @@ class ResultadoEnvio:
     destinatario: str
     sucesso: bool
     erro: str | None = None
+    tentativas: int = 1
+    assunto: str | None = None
 
 
 class EmailProvider(Protocol):
