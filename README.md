@@ -87,6 +87,16 @@ Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a se
 - `--dry-run`: apenas renderiza as mensagens sem enviá-las.
 - `--log-level`: ajusta o nível de log (padrão: `INFO`).
 
+## Assistente interativo (wizard)
+
+Usuários que preferem uma experiência guiada podem executar o assistente interativo em modo texto:
+
+```bash
+python emaileria_wizard.py
+```
+
+O assistente faz perguntas passo a passo sobre os arquivos envolvidos no envio, renderiza prévias e executa o disparo das mensagens ao final. Também é possível gerar um executável standalone (`emaileria-wizard` ou `emaileria-wizard.exe`) seguindo as instruções da seção [Gerando executável](#gerando-executável).
+
 ## Interface gráfica (GUI)
 
 Instale dependências (incluindo PySimpleGUI):
@@ -148,7 +158,8 @@ Dica: templates HTML podem ficar numa pasta `templates/` ao lado do executável.
    ./scripts/build_executable.sh
    ```
 
-O binário gerado ficará disponível em `dist/emaileria` (ou `dist/emaileria.exe` no Windows).
+Os binários gerados ficarão disponíveis em `dist/emaileria` e `dist/emaileria-wizard` (ou com extensão `.exe` no Windows).
+O primeiro corresponde ao envio automático via linha de comando, enquanto o segundo empacota o assistente interativo `emaileria_wizard.py`.
 
 ## Licença
 

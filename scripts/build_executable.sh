@@ -10,3 +10,4 @@ mkdir -p "$DIST_DIR"
 cd "$ROOT_DIR"
 
 pyinstaller --onefile email_sender.py --name emaileria
+pyinstaller --onefile emaileria_wizard.py --name emaileria-wizard
