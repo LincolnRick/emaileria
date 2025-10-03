@@ -1,0 +1,6 @@
+pandas>=2.0
+openpyxl>=3.1
+google-api-python-client>=2.127
+google-auth>=2.27
+google-auth-oauthlib>=1.2
+jinja2>=3.1
