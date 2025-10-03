@@ -5,9 +5,8 @@ Ferramenta de linha de comando para enviar e-mails personalizados via Gmail a pa
 ## Pré-requisitos
 
 1. **Python 3.10+** instalado.
-2. Criar um projeto no [Google Cloud Console](https://console.cloud.google.com/) e habilitar a API do Gmail.
-3. Configurar uma credencial do tipo *Desktop* e baixar o arquivo `credentials.json` para a raiz do projeto.
-4. Instalar as dependências:
+2. Uma conta Gmail com [verificação em duas etapas](https://myaccount.google.com/security) habilitada e uma [senha de app](https://support.google.com/accounts/answer/185833) gerada especificamente para o envio automatizado.
+3. Instalar as dependências:
 
    ```bash
    python -m venv .venv
@@ -46,19 +45,30 @@ python email_sender.py leads.xlsx \
   --body-template "$(cat template.html)"
 ```
 
-Na primeira execução será aberta uma janela do navegador solicitando que autorize o acesso à sua conta Gmail. O token de acesso será salvo no arquivo `token.json`.
+Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a senha de app). Você também pode informar as credenciais via linha de comando:
+
+```bash
+python email_sender.py leads.xlsx \
+  --sender "seu-email@gmail.com" \
+  --smtp-user "seu-email@gmail.com" \
+  --smtp-password "sua-senha-de-app" \
+  --subject-template "Plano funerário especial para {{ nome }}" \
+  --body-template "$(cat template.html)"
+```
+
+As mensagens são enviadas utilizando `smtplib.SMTP_SSL` diretamente contra `smtp.gmail.com:465`, portanto não é necessário configurar nenhum projeto no Google Cloud.
 
 ### Opções adicionais
 
 - `--sheet`: define o nome da aba da planilha (caso não seja a primeira).
-- `--credentials`: caminho alternativo para o `credentials.json`.
-- `--token`: caminho alternativo para o `token.json`.
+- `--smtp-user`: usuário SMTP a ser autenticado (por padrão é o mesmo informado em `--sender`).
+- `--smtp-password`: senha ou senha de app a ser utilizada (se omitido, será solicitado via prompt seguro).
 - `--dry-run`: apenas renderiza as mensagens sem enviá-las.
 - `--log-level`: ajusta o nível de log (padrão: `INFO`).
 
 ## Segurança
 
-- Nunca compartilhe o conteúdo de `credentials.json` ou `token.json`.
+- Prefira utilizar senhas de app em vez da senha principal da conta Gmail.
 - Guarde a planilha com os dados sensíveis em local seguro.
 
 ## Licença
