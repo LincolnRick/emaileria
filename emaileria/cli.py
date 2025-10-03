@@ -13,7 +13,7 @@ from . import config
 from .datasource.excel import load_contacts
 from .providers.smtp import SMTPProvider
 from .sender import _prepare_context, send_messages
-from .templating import render
+from .templating import TemplateRenderingError, render
 
 
 def _read_template(template: str | None, template_file: Path | None) -> str:
@@ -60,6 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a file containing the body template. Overrides --body-template when provided.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Render messages without sending them.")
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Número de linhas iniciais a ignorar antes do envio.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Quantidade máxima de contatos a serem processados após o offset.",
+    )
     parser.add_argument(
         "--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)."
     )
@@ -110,9 +121,8 @@ def _build_preview_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_contacts(path: Path, sheet: str | None) -> list[dict[str, object]]:
-    dataframe = load_contacts(path, sheet)
-    return dataframe.to_dict(orient="records")
+def _load_contacts(path: Path, sheet: str | None):
+    return load_contacts(path, sheet)
 
 
 def _render_preview(
@@ -130,7 +140,13 @@ def _render_preview(
         if len(preview_entries) >= limit:
             break
         context = _prepare_context(row)
-        subject, body = render(subject_template, body_template, context)
+        try:
+            subject, body = render(subject_template, body_template, context)
+        except TemplateRenderingError as exc:
+            raise SystemExit(
+                "Falha ao renderizar "
+                f"{exc.template_type} na linha {index}: placeholder '{exc.placeholder}' não encontrado."
+            ) from exc
         preview_entries.append((index, context["email"], subject, body))
     return preview_entries
 
@@ -284,9 +300,9 @@ def main(argv: list[str] | None = None) -> None:
             preview_args.body_template, preview_args.body_template_file
         )
 
-        contacts = _load_contacts(preview_args.excel, preview_args.sheet)
+        contacts_df = _load_contacts(preview_args.excel, preview_args.sheet)
         entries = _render_preview(
-            contacts=contacts,
+            contacts=contacts_df.to_dict(orient="records"),
             subject_template=subject_template,
             body_template=body_template,
             limit=preview_args.limit,
@@ -303,19 +319,59 @@ def main(argv: list[str] | None = None) -> None:
     subject_template = _read_template(args.subject_template, args.subject_template_file)
     body_template = _read_template(args.body_template, args.body_template_file)
 
-    contacts = _load_contacts(args.excel, args.sheet)
+    try:
+        contacts_df = _load_contacts(args.excel, args.sheet)
+    except ValueError as exc:
+        logging.error(str(exc))
+        raise SystemExit(1) from exc
+
+    total_contacts = len(contacts_df)
+    offset = args.offset or 0
+    if offset < 0:
+        logging.error("offset deve ser um inteiro maior ou igual a zero.")
+        raise SystemExit(1)
+
+    limit = args.limit
+    if limit is not None and limit <= 0:
+        logging.error("limit deve ser um inteiro positivo quando informado.")
+        raise SystemExit(1)
+
+    filtered_df = contacts_df.iloc[offset:]
+    if limit is not None:
+        filtered_df = filtered_df.iloc[:limit]
+
+    sampled_records: list[dict[str, object]] = []
+    for position, (_, row) in enumerate(filtered_df.iterrows()):
+        record = row.to_dict()
+        record["__row_position__"] = offset + position + 1
+        sampled_records.append(record)
+
+    processed_count = len(sampled_records)
 
     smtp_user = args.smtp_user or args.sender
 
     if args.dry_run:
         send_messages(
             sender=args.sender,
-            contacts=contacts,
+            contacts=sampled_records,
             subject_template=subject_template,
             body_template=body_template,
             dry_run=True,
         )
+        logging.info(
+            "Pré-visualizados %s de %s registros (offset=%s, limit=%s)",
+            processed_count,
+            total_contacts,
+            offset,
+            limit if limit is not None else "None",
+        )
         return
+
+    if args.smtp_password:
+        logging.warning(
+            "Por segurança, evite informar --smtp-password diretamente. "
+            "Considere usar o prompt interativo ou a variável de ambiente SMTP_PASSWORD."
+        )
 
     smtp_password = args.smtp_password or getpass.getpass(
         prompt="SMTP password (app password recommended): "
@@ -330,7 +386,7 @@ def main(argv: list[str] | None = None) -> None:
     ) as provider:
         send_messages(
             sender=args.sender,
-            contacts=contacts,
+            contacts=sampled_records,
             subject_template=subject_template,
             body_template=body_template,
             provider=provider,
