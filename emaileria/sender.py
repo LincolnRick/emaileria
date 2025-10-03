@@ -23,6 +23,7 @@ REQUIRED_KEYS = {"email", "tratamento", "nome"}
 _RETRY_DELAYS_SECONDS = [0, 1, 2, 4]
 _MAX_ATTEMPTS = len(_RETRY_DELAYS_SECONDS)
 _TEMPORARY_SMTP_CODES = {"421", "450", "451", "452"}
+_DEFAULT_RATE_LIMIT_PER_MINUTE = 80
 
 
 class _TokenBucket:
@@ -69,18 +70,24 @@ class _TokenBucket:
 
 def _get_rate_limiter() -> Optional[_TokenBucket]:
     env_value = os.getenv("RATE_LIMIT_PER_MINUTE")
-    if not env_value:
-        return None
-    try:
-        rate_limit = int(env_value)
-    except ValueError:
-        logger.warning(
-            "Invalid RATE_LIMIT_PER_MINUTE value '%s'. Disabling rate limiting.",
-            env_value,
-        )
-        return None
+
+    if env_value is None or env_value == "":
+        rate_limit = _DEFAULT_RATE_LIMIT_PER_MINUTE
+    else:
+        try:
+            rate_limit = int(env_value)
+        except ValueError:
+            logger.warning(
+                "Invalid RATE_LIMIT_PER_MINUTE value '%s'. Falling back to default (%s).",
+                env_value,
+                _DEFAULT_RATE_LIMIT_PER_MINUTE,
+            )
+            rate_limit = _DEFAULT_RATE_LIMIT_PER_MINUTE
+
     if rate_limit <= 0:
+        logger.info("RATE_LIMIT_PER_MINUTE <= 0, disabling rate limiting.")
         return None
+
     return _TokenBucket(rate_limit)
 
 
@@ -127,6 +134,7 @@ def _send_with_retries(
 
         logger.info("Sending email to %s (attempt %s/%s)", to_address, attempt, _MAX_ATTEMPTS)
         result = _safe_send(provider, message)
+        result.tentativas = attempt
 
         if result.sucesso:
             return result
@@ -151,7 +159,12 @@ def _send_with_retries(
             )
             time.sleep(sleep_time)
 
-    return ResultadoEnvio(destinatario=to_address, sucesso=False, erro="Unknown error")
+    return ResultadoEnvio(
+        destinatario=to_address,
+        sucesso=False,
+        erro="Unknown error",
+        tentativas=_MAX_ATTEMPTS,
+    )
 
 
 def _prepare_context(row: Dict[str, object]) -> Dict[str, str]:
@@ -227,13 +240,15 @@ def send_messages(
         logger.info("Prepared email to %s with subject '%s'", context["email"], subject)
 
         if dry_run or provider is None:
-            results.append(
-                ResultadoEnvio(destinatario=context["email"], sucesso=True)
+            result = ResultadoEnvio(
+                destinatario=context["email"], sucesso=True, assunto=subject
             )
+            results.append(result)
             continue
 
         message = _create_message(sender, context["email"], subject, body)
         result = _send_with_retries(provider, message, rate_limiter)
+        result.assunto = subject
         results.append(result)
 
     return results
