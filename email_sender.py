@@ -33,13 +33,18 @@ def load_contacts(excel_path: Path, sheet: str | None = None) -> pd.DataFrame:
     logger.info("Loading contacts from %s", excel_path)
     data = pd.read_excel(excel_path, sheet_name=sheet)
     required_columns = {"email", "tratamento", "nome"}
-    missing = required_columns - set(map(str.lower, data.columns))
+
+    # Map lowercase column names to their original header for validation.
+    lowercase_map = {column.lower(): column for column in data.columns}
+    missing = required_columns - set(lowercase_map)
     if missing:
         raise ValueError(
             "Missing required columns: " + ", ".join(sorted(missing))
         )
-    # Normalize required column names to lower case for downstream usage
-    data = data.rename(columns={col: col.lower() for col in data.columns})
+
+    # Only normalize the required columns to lower case, preserving other headers.
+    rename_map = {lowercase_map[col]: col for col in required_columns}
+    data = data.rename(columns=rename_map)
     return data
 
 
@@ -72,8 +77,26 @@ def send_messages(
         raise ValueError("SMTP connection is required when not running in dry-run mode.")
 
     sent_to: List[str] = []
+    required_keys = {"email", "tratamento", "nome"}
+
     for row in contacts:
-        context = {k: str(v) if pd.notna(v) else "" for k, v in row.items()}
+        context: Dict[str, str] = {}
+        for key, value in row.items():
+            value_str = str(value) if pd.notna(value) else ""
+            lowercase_key = key.lower()
+            if lowercase_key in required_keys:
+                # Ensure mandatory keys are always available in lowercase while
+                # keeping any optional columns with their original casing.
+                context[lowercase_key] = value_str
+            else:
+                context[key] = value_str
+
+        missing_keys = required_keys - context.keys()
+        if missing_keys:
+            raise KeyError(
+                "Missing required contact data: " + ", ".join(sorted(missing_keys))
+            )
+
         subject = render_template(subject_template, context)
         body = render_template(body_template, context)
         message = create_message(
