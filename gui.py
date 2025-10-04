@@ -1,10 +1,11 @@
+import json
 import logging
 import os
 import queue
 import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import pandas as pd
 import PySimpleGUI as sg
@@ -24,6 +25,41 @@ from emaileria.templating import TemplateRenderingError, render
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
 PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_]+)\s*}}")
+SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
+PROCESSING_PATTERN = re.compile(
+    r"Processando\s+(?P<processed>\d+)\s+contatos.*total[^0-9]*(?P<total>\d+)",
+    re.IGNORECASE,
+)
+
+current_sheets: list[str] = []
+
+
+def _load_settings() -> dict[str, str]:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items() if isinstance(value, str)}
+
+
+def _save_settings(values: Mapping[str, object] | None) -> None:
+    if values is None:
+        return
+
+    relevant = {
+        "excel": str(values.get("-EXCEL-", "") or ""),
+        "html": str(values.get("-HTML-", "") or ""),
+        "sheet": str(values.get("-SHEET-", "") or ""),
+        "sender": str(values.get("-SENDER-", "") or ""),
+    }
+    try:
+        SETTINGS_PATH.write_text(json.dumps(relevant, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        logging.getLogger(__name__).debug("Não foi possível salvar as preferências da GUI.")
 
 
 def _read_html_template(path: str) -> str | None:
@@ -53,9 +89,133 @@ def _extract_placeholders(*templates: str) -> set[str]:
     return placeholders
 
 
+INTERACTIVE_KEYS = [
+    "-EXCEL-",
+    "-EXCEL-BROWSE-",
+    "-SHEET-",
+    "-SENDER-",
+    "-SMTPUSER-",
+    "-SMTPPASS-",
+    "-SUBJECT-",
+    "-SUBJECTFILE-",
+    "-SUBJECTFILE-BROWSE-",
+    "-HTML-",
+    "-HTML-BROWSE-",
+    "-HTML-PREVIEW-",
+    "-DRYRUN-",
+    "-LOGLEVEL-",
+    "-PREVIEW-",
+    "-RUN-",
+    "-EXIT-",
+]
+
+progress_state: dict[str, int] = {"total": 0, "sent": 0}
+
+
+def _set_controls_enabled(window: sg.Window, *, enabled: bool) -> None:
+    for key in INTERACTIVE_KEYS:
+        element = window.AllKeysDict.get(key)
+        if element is None:
+            continue
+        try:
+            element.update(disabled=not enabled)
+        except TypeError:
+            try:
+                element.update(state="disabled" if not enabled else "normal")
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+def _update_counter_display(window: sg.Window, *, unknown_total: bool = False) -> None:
+    total = progress_state.get("total", 0)
+    sent = progress_state.get("sent", 0)
+    if total == 0 and unknown_total:
+        total_display = "?"
+    else:
+        total_display = str(total)
+    window["-COUNTER-"].update(f"{sent}/{total_display}")
+
+
+def _set_running_state(window: sg.Window, *, running: bool) -> None:
+    progress_bar = window["-PROGRESS-"]
+    if running:
+        progress_state["total"] = 0
+        progress_state["sent"] = 0
+        _set_controls_enabled(window, enabled=False)
+        window["-STATUS-"].update("Processando...")
+        progress_bar.update(current_count=0, visible=True)
+        _update_counter_display(window, unknown_total=True)
+        try:
+            progress_bar.Widget.start(10)
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return
+
+    try:
+        progress_bar.Widget.stop()
+    except Exception:  # pylint: disable=broad-except
+        pass
+    progress_bar.update(visible=False)
+    window["-STATUS-"].update("Pronto")
+    _set_controls_enabled(window, enabled=True)
+    if progress_state["total"] == 0:
+        window["-COUNTER-"].update("0/0")
+    else:
+        _update_counter_display(window)
+
+
+def _apply_saved_settings(window: sg.Window) -> None:
+    settings = _load_settings()
+    if not settings:
+        return
+
+    excel_path = settings.get("excel", "")
+    if excel_path:
+        window["-EXCEL-"].update(excel_path)
+        if Path(excel_path).exists():
+            _update_sheet_combo(window, excel_path)
+
+    sheet_value = settings.get("sheet", "")
+    if sheet_value and sheet_value in current_sheets:
+        window["-SHEET-"].update(value=sheet_value)
+
+    html_path = settings.get("html", "")
+    if html_path:
+        window["-HTML-"].update(html_path)
+
+    sender_value = settings.get("sender", "")
+    if sender_value:
+        window["-SENDER-"].update(sender_value)
+
+
+def _handle_progress_from_log(window: sg.Window, message: str) -> None:
+    match = PROCESSING_PATTERN.search(message)
+    if match:
+        try:
+            progress_state["total"] = int(match.group("processed"))
+        except (TypeError, ValueError):
+            progress_state["total"] = 0
+        progress_state["sent"] = 0
+        _update_counter_display(window, unknown_total=progress_state["total"] == 0)
+        return
+
+    if "Prepared email to" in message:
+        progress_state["sent"] = progress_state.get("sent", 0) + 1
+        if (
+            progress_state.get("total")
+            and progress_state["sent"] > progress_state.get("total", 0)
+        ):
+            progress_state["total"] = progress_state["sent"]
+        _update_counter_display(
+            window,
+            unknown_total=progress_state.get("total", 0) == 0,
+        )
+
 def _update_sheet_combo(window: sg.Window, file_path: str) -> None:
     sheet_element = window["-SHEET-"]
     sheet_element.update(values=[], value="", disabled=True)
+    global current_sheets
+    current_sheets = []
     if not file_path:
         return
 
@@ -75,6 +235,7 @@ def _update_sheet_combo(window: sg.Window, file_path: str) -> None:
         return
 
     sheet_element.update(values=sheet_names, value=sheet_names[0], disabled=False)
+    current_sheets = sheet_names
 
 
 class QueueLogHandler(logging.Handler):
@@ -109,8 +270,22 @@ def _prepare_run_params(
     if not excel_path:
         sg.popup_error("Selecione a planilha (XLSX/CSV).")
         return None
+    if not Path(excel_path).exists():
+        sg.popup_error("Arquivo de planilha não encontrado. Verifique o caminho informado.")
+        return None
 
     subject_template = str(values.get("-SUBJECT-", "")).strip()
+    subject_file_path = str(values.get("-SUBJECTFILE-", "")).strip()
+    if subject_file_path:
+        try:
+            subject_template = Path(subject_file_path).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            sg.popup_error("Arquivo de assunto informado não foi encontrado.")
+            return None
+        except OSError as exc:
+            sg.popup_error(f"Erro ao ler o arquivo de assunto: {exc}")
+            return None
+
     if not subject_template:
         sg.popup_error("Informe o assunto (template).")
         return None
@@ -119,9 +294,15 @@ def _prepare_run_params(
     body_html = _read_html_template(body_html_path)
     if body_html is None:
         return None
+    if not body_html.strip():
+        sg.popup_error("O arquivo de template HTML está vazio.")
+        return None
 
     sheet_value_raw = str(values.get("-SHEET-", "") or "").strip()
     sheet_value = sheet_value_raw or None
+    if sheet_value and current_sheets and sheet_value not in current_sheets:
+        sg.popup_error("A aba selecionada não foi encontrada. Recarregue a planilha e tente novamente.")
+        return None
 
     sender_value = str(values.get("-SENDER-", "")).strip()
     dry_run_value = (
@@ -268,6 +449,42 @@ def _show_preview(params: RunParams) -> bool:
     return True
 
 
+def _show_html_quick_preview(html_path: str) -> None:
+    content = _read_html_template(html_path)
+    if content is None:
+        return
+    stripped_content = content.strip()
+    if not stripped_content:
+        sg.popup_error("O arquivo de template HTML está vazio.")
+        return
+
+    first_line = stripped_content.splitlines()[0] if stripped_content else ""
+    preview_layout = [
+        [sg.Text("Primeira linha do template HTML:")],
+        [
+            sg.Multiline(
+                first_line,
+                size=(80, 5),
+                disabled=True,
+                autoscroll=False,
+                font=("Consolas", 10),
+            )
+        ],
+        [sg.Button("Fechar")],
+    ]
+    preview_window = sg.Window(
+        "Pré-visualização rápida do HTML",
+        preview_layout,
+        modal=True,
+        finalize=True,
+    )
+    while True:
+        event, _ = preview_window.read()
+        if event in (sg.WIN_CLOSED, "Fechar"):
+            break
+    preview_window.close()
+
+
 # -------- UI --------
 sg.theme("SystemDefault")
 
@@ -275,7 +492,7 @@ layout = [
     [
         sg.Text("Planilha (XLSX/CSV)"),
         sg.Input(key="-EXCEL-", enable_events=True),
-        sg.FileBrowse(file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),)),
+        sg.FileBrowse(key="-EXCEL-BROWSE-", file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),)),
     ],
     [
         sg.Text("Aba (sheet)"),
@@ -285,6 +502,7 @@ layout = [
             size=(25, 1),
             readonly=True,
             disabled=True,
+            enable_events=True,
         ),
     ],
     [sg.HorizontalSeparator()],
@@ -294,9 +512,15 @@ layout = [
     [sg.HorizontalSeparator()],
     [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60, 1))],
     [
+        sg.Text("Assunto por arquivo (.txt)"),
+        sg.Input(key="-SUBJECTFILE-", enable_events=True, size=(60, 1)),
+        sg.FileBrowse(key="-SUBJECTFILE-BROWSE-", file_types=(("Texto", "*.txt;*.jinja;*.j2"),)),
+    ],
+    [
         sg.Text("Template HTML"),
-        sg.Input(key="-HTML-"),
-        sg.FileBrowse(file_types=(("HTML", "*.html;*.htm;*.j2"),)),
+        sg.Input(key="-HTML-", enable_events=True),
+        sg.FileBrowse(key="-HTML-BROWSE-", file_types=(("HTML", "*.html;*.htm;*.j2"),)),
+        sg.Button("Preview", key="-HTML-PREVIEW-"),
     ],
     [
         sg.Checkbox(
@@ -317,6 +541,18 @@ layout = [
     ],
     [sg.HorizontalSeparator()],
     [
+        sg.ProgressBar(
+            max_value=100,
+            orientation="h",
+            size=(40, 20),
+            key="-PROGRESS-",
+            visible=False,
+            bar_color=("#1f77b4", "#e0e0e0"),
+        ),
+        sg.Text("Pronto", key="-STATUS-", size=(20, 1)),
+        sg.Text("0/0", key="-COUNTER-", size=(10, 1)),
+    ],
+    [
         sg.Button("Validar & Prévia", key="-PREVIEW-"),
         sg.Button("Enviar", key="-RUN-", bind_return_key=True),
         sg.Button("Sair", key="-EXIT-"),
@@ -333,6 +569,8 @@ layout = [
 ]
 
 window = sg.Window("Emaileria — Envio de E-mails", layout, finalize=True)
+window["-COUNTER-"].update("0/0")
+_apply_saved_settings(window)
 
 log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 queue_handler = QueueLogHandler(log_queue)
@@ -353,11 +591,41 @@ if IMPORT_ERROR is not None:
 while True:
     event, values = window.read(timeout=100)
     if event in (sg.WIN_CLOSED, "-EXIT-"):
+        _save_settings(values)
         break
 
     if event == "-EXCEL-":
         excel_path = values["-EXCEL-"].strip()
         _update_sheet_combo(window, excel_path)
+        _save_settings(values)
+
+    if event == "-SHEET-":
+        _save_settings(values)
+
+    if event == "-HTML-":
+        _save_settings(values)
+
+    if event == "-SENDER-":
+        _save_settings(values)
+
+    if event == "-SUBJECTFILE-":
+        subject_file_path = str(values.get("-SUBJECTFILE-", "")).strip()
+        if subject_file_path and Path(subject_file_path).exists():
+            try:
+                subject_text = Path(subject_file_path).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                sg.popup_error(f"Erro ao ler o arquivo de assunto: {exc}")
+                continue
+            values["-SUBJECT-"] = subject_text
+            window["-SUBJECT-"].update(subject_text)
+
+    if event == "-HTML-PREVIEW-":
+        html_path = str(values.get("-HTML-", "")).strip()
+        if not html_path:
+            sg.popup_error("Selecione o arquivo de template HTML para visualizar.")
+        else:
+            _show_html_quick_preview(html_path)
+        continue
 
     if event in ("-PREVIEW-", "-RUN-"):
         if IMPORT_ERROR is not None:
@@ -377,7 +645,13 @@ while True:
         if params is None:
             continue
 
+        window["-SUBJECT-"].update(params.subject_template)
+        values["-SUBJECT-"] = params.subject_template
+        _save_settings(values)
+        _set_running_state(window, running=True)
+
         if event == "-PREVIEW-" and not _show_preview(params):
+            _set_running_state(window, running=False)
             continue
 
         mode = "preview" if event == "-PREVIEW-" else "run"
@@ -388,9 +662,11 @@ while True:
             tag, payload = log_queue.get_nowait()
             if tag == "LOG":
                 append_log(window, payload)
+                _handle_progress_from_log(window, payload)
             elif tag == "ERROR":
                 append_log(window, payload, tag="ERR")
                 worker_thread = None
+                _set_running_state(window, running=False)
             elif tag == "RESULT":
                 mode_label, separator, code = payload.partition(":")
                 if separator:
@@ -404,6 +680,7 @@ while True:
                     f"\n[INFO] {description} finalizada com código {result_code}\n",
                 )
                 worker_thread = None
+                _set_running_state(window, running=False)
     except queue.Empty:
         pass
 
