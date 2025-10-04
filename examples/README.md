@@ -8,6 +8,8 @@ Este diretório reúne um conjunto mínimo de arquivos para testar o Emaileria v
 - `assunto_exemplo.txt`: template de assunto usando o nome e a cidade do lead.
 - `corpo_exemplo.html`: template HTML com placeholders para todas as colunas da planilha.
 
+> Você pode remover `data_envio` ou usar `{{ data_envio | default('') }}`. O Emaileria também injeta `now`, `hoje`, `hora_envio` por padrão.
+
 ## Como usar
 
 1. Abra o aplicativo desejado e selecione a planilha `leads_exemplo.xlsx` quando for solicitado.
