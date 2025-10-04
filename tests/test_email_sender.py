@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import sys
 
 import pandas as pd
@@ -7,6 +8,7 @@ from jinja2 import Template
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from emaileria.datasource.excel import load_contacts
+import emaileria.cli as cli_module
 import emaileria.sender as sender_module
 
 
@@ -161,3 +163,62 @@ def test_send_messages_does_not_retry_non_temporary_error(monkeypatch):
     assert results[0].sucesso is False
     assert results[0].erro == "550 Permanent failure"
     assert limiter_calls == [1]
+
+
+def test_cli_dry_run_logs_only_summary(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    excel_path = tmp_path / "contacts.xlsx"
+    excel_path.write_text("placeholder", encoding="utf-8")
+
+    contacts_df = pd.DataFrame(
+        [
+            {
+                "email": "joao@example.com",
+                "nome": "João",
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_contacts",
+        lambda path, sheet=None: contacts_df.copy(),
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "send_messages",
+        lambda **kwargs: [
+            sender_module.ResultadoEnvio(
+                destinatario="joao@example.com",
+                sucesso=True,
+                assunto="Sensitive subject João",
+            )
+        ],
+    )
+
+    cli_module.main(
+        [
+            str(excel_path),
+            "--sender",
+            "sender@example.com",
+            "--smtp-password",
+            "hunter2",
+            "--subject-template",
+            "Sensitive subject {{ nome }}",
+            "--body-template",
+            "<p>Olá {{ nome }}</p>",
+            "--dry-run",
+        ]
+    )
+
+    debug_messages = [record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG]
+    assert any("Resumo do dry-run" in message for message in debug_messages)
+    for message in debug_messages:
+        assert "Sensitive subject" not in message
+        assert "hunter2" not in message
+
+    summary_message = next(message for message in debug_messages if "Resumo do dry-run" in message)
+    assert "total=1" in summary_message
+    assert "sucesso=1" in summary_message

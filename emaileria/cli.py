@@ -508,7 +508,15 @@ def main(argv: list[str] | None = None) -> None:
             body_template=body_template,
             dry_run=True,
         )
-        logging.debug("Resultados de dry-run: %s", results)
+        total_results = len(results)
+        successful = sum(1 for result in results if result.sucesso)
+        failed = total_results - successful
+        logging.debug(
+            "Resumo do dry-run: total=%s sucesso=%s falha=%s",
+            total_results,
+            successful,
+            failed,
+        )
         logging.info(
             "Pré-visualizados %s de %s registros (offset=%s, limit=%s)",
             processed_count,
