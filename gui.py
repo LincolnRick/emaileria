@@ -1,111 +1,110 @@
-import os
-import sys
-import subprocess
-import threading
+import logging
 import queue
+import threading
 from pathlib import Path
+from typing import Optional
+
 import PySimpleGUI as sg
 
-# -------- Utilidades --------
-def read_file_text(path: str) -> str:
-    if not path:
-        return ""
-    p = Path(path)
-    if not p.exists():
-        return ""
-    return p.read_text(encoding="utf-8")
+try:
+    from email_sender import RunParams, run_program
+except ImportError as exc:  # pragma: no cover - integração com UI
+    IMPORT_ERROR: Optional[Exception] = exc
+    RunParams = None  # type: ignore[assignment]
+    run_program = None  # type: ignore[assignment]
+else:
+    IMPORT_ERROR = None
 
-def stream_process(cmd_list, cwd=None):
-    """
-    Executa um subprocesso emitindo stdout/stderr em tempo real usando fila.
-    Retorna (returncode, output_text).
-    """
-    q = queue.Queue()
-    output_lines = []
 
-    def enqueue_output(pipe, tag):
-        for line in iter(pipe.readline, b""):
-            txt = line.decode(errors="ignore")
-            q.put((tag, txt))
-        pipe.close()
+class QueueLogHandler(logging.Handler):
+    """Handler de logging que envia mensagens para a fila da interface."""
 
-    proc = subprocess.Popen(
-        cmd_list,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=1
-    )
+    def __init__(self, message_queue: "queue.Queue[tuple[str, str]]") -> None:
+        super().__init__()
+        self._queue = message_queue
+        self.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
 
-    t_out = threading.Thread(target=enqueue_output, args=(proc.stdout, "OUT"), daemon=True)
-    t_err = threading.Thread(target=enqueue_output, args=(proc.stderr, "ERR"), daemon=True)
-    t_out.start()
-    t_err.start()
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - integração com UI
+        try:
+            message = self.format(record)
+        except Exception:  # pylint: disable=broad-except
+            message = record.getMessage()
+        self._queue.put(("LOG", message + "\n"))
 
-    return proc, q, output_lines
 
-def build_command(
-    excel_path: str,
-    sender: str,
-    subject_template: str,
-    body_html_path: str,
-    sheet: str,
-    smtp_user: str,
-    smtp_password: str,
-    dry_run: bool,
-    log_level: str
-):
-    cmd = [sys.executable, "email_sender.py", excel_path]
-    if sender:
-        cmd += ["--sender", sender]
-    if subject_template:
-        cmd += ["--subject-template", subject_template]
+def append_log(window: sg.Window, text: str, *, tag: str = "OUT") -> None:
+    text_color = "red" if tag == "ERR" else None
+    window["-LOG-"].print(text, end="", text_color=text_color)
 
-    body_html = read_file_text(body_html_path)
-    if body_html:
-        cmd += ["--body-template", body_html]
-
-    if sheet:
-        cmd += ["--sheet", sheet]
-    if smtp_user:
-        cmd += ["--smtp-user", smtp_user]
-    if smtp_password:
-        cmd += ["--smtp-password", smtp_password]
-    if dry_run:
-        cmd += ["--dry-run"]
-    if log_level:
-        cmd += ["--log-level", log_level]
-
-    return cmd
 
 # -------- UI --------
 sg.theme("SystemDefault")
 
 layout = [
-    [sg.Text("Planilha (XLSX/CSV)"), sg.Input(key="-EXCEL-"), sg.FileBrowse(file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),))],
-    [sg.Text("Aba (sheet)"), sg.Input(key="-SHEET-", size=(25,1))],
+    [
+        sg.Text("Planilha (XLSX/CSV)"),
+        sg.Input(key="-EXCEL-"),
+        sg.FileBrowse(file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),)),
+    ],
+    [sg.Text("Aba (sheet)"), sg.Input(key="-SHEET-", size=(25, 1))],
     [sg.HorizontalSeparator()],
-    [sg.Text("Remetente (From)"), sg.Input(key="-SENDER-", size=(40,1))],
-    [sg.Text("SMTP User"), sg.Input(key="-SMTPUSER-", size=(40,1))],
-    [sg.Text("SMTP Password"), sg.Input(key="-SMTPPASS-", password_char="*", size=(40,1))],
+    [sg.Text("Remetente (From)"), sg.Input(key="-SENDER-", size=(40, 1))],
+    [sg.Text("SMTP User"), sg.Input(key="-SMTPUSER-", size=(40, 1))],
+    [sg.Text("SMTP Password"), sg.Input(key="-SMTPPASS-", password_char="*", size=(40, 1))],
     [sg.HorizontalSeparator()],
-    [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60,1))],
-    [sg.Text("Template HTML"), sg.Input(key="-HTML-"), sg.FileBrowse(file_types=(("HTML", "*.html;*.htm;*.j2"),))],
-    [sg.Checkbox("Dry-run (não enviar, apenas pré-visualizar)", key="-DRYRUN-", default=True)],
-    [sg.Text("Log level"), sg.Combo(values=["INFO","DEBUG","WARNING","ERROR"], default_value="INFO", key="-LOGLEVEL-", readonly=True, size=(15,1))],
+    [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60, 1))],
+    [
+        sg.Text("Template HTML"),
+        sg.Input(key="-HTML-"),
+        sg.FileBrowse(file_types=(("HTML", "*.html;*.htm;*.j2"),)),
+    ],
+    [
+        sg.Checkbox(
+            "Dry-run (não enviar, apenas pré-visualizar)",
+            key="-DRYRUN-",
+            default=True,
+        )
+    ],
+    [
+        sg.Text("Log level"),
+        sg.Combo(
+            values=["INFO", "DEBUG", "WARNING", "ERROR"],
+            default_value="INFO",
+            key="-LOGLEVEL-",
+            readonly=True,
+            size=(15, 1),
+        ),
+    ],
     [sg.HorizontalSeparator()],
     [sg.Button("Enviar", key="-RUN-", bind_return_key=True), sg.Button("Sair", key="-EXIT-")],
-    [sg.Multiline(key="-LOG-", size=(100,20), autoscroll=True, write_only=True, font=("Consolas", 10))]
+    [
+        sg.Multiline(
+            key="-LOG-",
+            size=(100, 20),
+            autoscroll=True,
+            write_only=True,
+            font=("Consolas", 10),
+        )
+    ],
 ]
 
 window = sg.Window("Emaileria — Envio de E-mails", layout, finalize=True)
 
-proc = None
-queue_stream = None
-buffer_lines = []
+log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+queue_handler = QueueLogHandler(log_queue)
+root_logger = logging.getLogger()
+if not any(isinstance(handler, QueueLogHandler) for handler in root_logger.handlers):
+    root_logger.addHandler(queue_handler)
+root_logger.setLevel(logging.INFO)
 
-def append_log(text, tag="OUT"):
-    window["-LOG-"].print(text, end="")
+worker_thread: Optional[threading.Thread] = None
+
+if IMPORT_ERROR is not None:
+    append_log(
+        window,
+        "[ERR] Não foi possível importar email_sender. Execute este programa a partir da raiz do projeto.\n",
+        tag="ERR",
+    )
 
 while True:
     event, values = window.read(timeout=100)
@@ -113,46 +112,93 @@ while True:
         break
 
     if event == "-RUN-":
+        if IMPORT_ERROR is not None:
+            sg.popup_error(
+                "Não foi possível importar o módulo email_sender. "
+                "Execute este programa a partir da raiz do projeto.\n"
+                f"Detalhes: {IMPORT_ERROR}"
+            )
+            continue
+
+        if worker_thread is not None and worker_thread.is_alive():
+            sg.popup_error("Já existe um envio em andamento. Aguarde a finalização.")
+            continue
+
         excel = values["-EXCEL-"].strip()
         if not excel:
             sg.popup_error("Selecione a planilha (XLSX/CSV).")
             continue
 
-        cmd = build_command(
-            excel_path=excel,
-            sender=values["-SENDER-"].strip(),
-            subject_template=values["-SUBJECT-"].strip(),
-            body_html_path=values["-HTML-"].strip(),
-            sheet=values["-SHEET-"].strip(),
-            smtp_user=values["-SMTPUSER-"].strip(),
-            smtp_password=values["-SMTPPASS-"].strip(),
+        sender = values["-SENDER-"].strip()
+        if not sender:
+            sg.popup_error("Informe o remetente (From).")
+            continue
+
+        subject_template = values["-SUBJECT-"].strip()
+        if not subject_template:
+            sg.popup_error("Informe o assunto (template).")
+            continue
+
+        body_html_path = values["-HTML-"].strip()
+        if not body_html_path:
+            sg.popup_error("Selecione o arquivo de template HTML.")
+            continue
+
+        try:
+            body_html = Path(body_html_path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            sg.popup_error("Arquivo de template HTML não encontrado.")
+            continue
+        except OSError as exc:
+            sg.popup_error(f"Erro ao ler o template HTML: {exc}")
+            continue
+
+        params = RunParams(
+            input_path=Path(excel),
+            sender=sender,
+            subject_template=subject_template,
+            body_html=body_html,
+            sheet=values["-SHEET-"].strip() or None,
+            smtp_user=values["-SMTPUSER-"].strip() or None,
+            smtp_password=values["-SMTPPASS-"].strip() or None,
             dry_run=values["-DRYRUN-"],
-            log_level=values["-LOGLEVEL-"]
+            log_level=values["-LOGLEVEL-"] or None,
         )
 
-        append_log(f"\n$ {' '.join([('\"'+c+'\"' if ' ' in c else c) for c in cmd])}\n")
-        try:
-            proc, queue_stream, buffer_lines = stream_process(cmd)
-        except Exception as e:
-            append_log(f"[ERR] Falha ao iniciar o envio: {e}\n", tag="ERR")
-            proc = None
-            queue_stream = None
+        append_log(window, "\n[INFO] Iniciando envio\n")
+        append_log(
+            window,
+            "[INFO] Planilha: {} | Sheet: {} | Remetente: {} | Assunto: {}\n".format(
+                excel,
+                values["-SHEET-"].strip() or "(padrão)",
+                sender,
+                subject_template,
+            ),
+        )
 
-    # consumir fluxo
-    if queue_stream is not None and proc is not None:
-        try:
-            while True:
-                tag, line = queue_stream.get_nowait()
-                append_log(line, tag=tag)
-                buffer_lines.append(line)
-        except queue.Empty:
-            pass
+        def _run() -> None:
+            try:
+                result_code = run_program(params)  # type: ignore[misc]
+            except Exception as exc:  # pylint: disable=broad-except
+                log_queue.put(("ERROR", f"Falha durante a execução: {exc}\n"))
+            else:
+                log_queue.put(("RESULT", str(result_code)))
 
-        # terminou?
-        if proc.poll() is not None:
-            rc = proc.returncode
-            append_log(f"\n[INFO] Finalizado com código {rc}\n")
-            proc = None
-            queue_stream = None
+        worker_thread = threading.Thread(target=_run, daemon=True)
+        worker_thread.start()
+
+    try:
+        while True:
+            tag, payload = log_queue.get_nowait()
+            if tag == "LOG":
+                append_log(window, payload)
+            elif tag == "ERROR":
+                append_log(window, payload, tag="ERR")
+                worker_thread = None
+            elif tag == "RESULT":
+                append_log(window, f"\n[INFO] Finalizado com código {payload}\n")
+                worker_thread = None
+    except queue.Empty:
+        pass
 
 window.close()
