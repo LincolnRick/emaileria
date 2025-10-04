@@ -32,17 +32,17 @@ _CSV_HEADERS = ["timestamp", "email", "assunto", "status", "tentativas", "erro"]
 class RunParams:
     """Parâmetros para execução do envio de emails."""
 
-    input_path: Path
+    input_path: str
+    sheet: str | None
     sender: str
+    smtp_user: str
+    smtp_password: str
     subject_template: str
     body_html: str
-    sheet: str | None = None
-    smtp_user: str | None = None
-    smtp_password: str | None = None
-    dry_run: bool = False
+    dry_run: bool = True
     limit: int | None = None
     offset: int | None = None
-    log_level: str | None = None
+    log_level: str | None = "INFO"
 
 
 def _ensure_logs_dir() -> None:
@@ -188,7 +188,8 @@ def run_program(params: RunParams) -> int:
 
     processed_count = len(sampled_records)
 
-    smtp_user = params.smtp_user or params.sender
+    smtp_user_value = params.smtp_user.strip()
+    smtp_user = smtp_user_value or params.sender
 
     if params.dry_run:
         try:
@@ -212,13 +213,15 @@ def run_program(params: RunParams) -> int:
         )
         return 0
 
-    if params.smtp_password:
+    smtp_password_value = params.smtp_password.strip()
+
+    if smtp_password_value:
         logging.warning(
             "Por segurança, evite informar --smtp-password diretamente. "
             "Considere usar o prompt interativo ou a variável de ambiente SMTP_PASSWORD."
         )
 
-    smtp_password = params.smtp_password or os.getenv("SMTP_PASSWORD")
+    smtp_password = smtp_password_value or os.getenv("SMTP_PASSWORD")
     if smtp_password is None:
         smtp_password = getpass.getpass(
             prompt="SMTP password (app password recommended): "
@@ -378,14 +381,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise SystemExit(1) from exc
 
     params = RunParams(
-        input_path=args.excel,
+        input_path=str(args.excel),
+        sheet=args.sheet,
         sender=args.sender,
+        smtp_user=args.smtp_user or args.sender,
+        smtp_password=args.smtp_password or "",
         subject_template=subject_template,
         body_html=body_template,
-        sheet=args.sheet,
-        smtp_user=args.smtp_user,
-        smtp_password=args.smtp_password,
-        dry_run=args.dry_run,
+        dry_run=bool(args.dry_run),
         limit=args.limit,
         offset=args.offset,
         log_level=args.log_level,
@@ -396,7 +399,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise SystemExit(exit_code)
 
 
-__all__ = ["RunParams", "run_program", "main", "RATE_LIMIT_PER_MINUTE"]
+__all__ = [
+    "RunParams",
+    "run_program",
+    "main",
+    "RATE_LIMIT_PER_MINUTE",
+    "load_contacts",
+]
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution entry point
