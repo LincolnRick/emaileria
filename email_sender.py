@@ -188,6 +188,12 @@ def run_program(params: RunParams) -> int:
 
     processed_count = len(sampled_records)
 
+    logging.info(
+        "Processando %s contatos (total na planilha: %s)",
+        processed_count,
+        total_contacts,
+    )
+
     smtp_user_value = params.smtp_user.strip()
     smtp_user = smtp_user_value or params.sender
 
