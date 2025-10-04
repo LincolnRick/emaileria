@@ -201,6 +201,7 @@ def send_messages(
     body_template: str,
     provider: EmailProvider | None = None,
     dry_run: bool = False,
+    allow_missing_fields: bool = False,
 ) -> List[ResultadoEnvio]:
     """Render and optionally send messages for every contact."""
     if not dry_run and provider is None:
@@ -225,8 +226,24 @@ def send_messages(
 
         context = _prepare_context(row_data)
 
+        missing_for_row: list[str] = []
+
+        def _handle_missing(placeholder: str) -> None:
+            missing_for_row.append(placeholder)
+
         try:
-            subject, body = render(subject_template, body_template, context)
+            render_kwargs = {}
+            if allow_missing_fields:
+                render_kwargs = {
+                    "allow_missing": True,
+                    "on_missing": _handle_missing,
+                }
+            subject, body = render(
+                subject_template,
+                body_template,
+                context,
+                **render_kwargs,
+            )
         except TemplateRenderingError as exc:
             logger.error(
                 "Falha ao renderizar %s na linha %s: placeholder '%s' não encontrado. "
@@ -236,6 +253,14 @@ def send_messages(
                 exc.placeholder,
             )
             raise SystemExit(1) from exc
+
+        if allow_missing_fields and missing_for_row:
+            for placeholder in sorted(set(missing_for_row)):
+                logger.warning(
+                    "Linha %s: placeholder '%s' ausente. Valor vazio utilizado.",
+                    row_position,
+                    placeholder,
+                )
 
         logger.info("Prepared email to %s with subject '%s'", context["email"], subject)
 

@@ -43,6 +43,7 @@ class RunParams:
     limit: int | None = None
     offset: int | None = None
     log_level: str | None = "INFO"
+    allow_missing_fields: bool = False
 
 
 def _ensure_logs_dir() -> None:
@@ -194,6 +195,11 @@ def run_program(params: RunParams) -> int:
         total_contacts,
     )
 
+    if params.allow_missing_fields:
+        logging.info(
+            "Modo tolerante ativo: placeholders ausentes serão preenchidos com vazio."
+        )
+
     smtp_user_value = params.smtp_user.strip()
     smtp_user = smtp_user_value or params.sender
 
@@ -205,6 +211,7 @@ def run_program(params: RunParams) -> int:
                 subject_template=params.subject_template,
                 body_template=params.body_html,
                 dry_run=True,
+                allow_missing_fields=params.allow_missing_fields,
             )
         except SystemExit as exc:
             return int(exc.code or 1)
@@ -250,6 +257,7 @@ def run_program(params: RunParams) -> int:
                     body_template=params.body_html,
                     provider=provider,
                     dry_run=False,
+                    allow_missing_fields=params.allow_missing_fields,
                 )
             except SystemExit as exc:
                 return int(exc.code or 1)
