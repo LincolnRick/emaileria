@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import threading
 from pathlib import Path
@@ -153,6 +154,9 @@ while True:
             sg.popup_error(f"Erro ao ler o template HTML: {exc}")
             continue
 
+        password_value = values["-SMTPPASS-"].strip()
+        env_password = os.getenv("SMTP_PASSWORD")
+
         params = RunParams(
             input_path=Path(excel),
             sender=sender,
@@ -160,7 +164,7 @@ while True:
             body_html=body_html,
             sheet=values["-SHEET-"].strip() or None,
             smtp_user=values["-SMTPUSER-"].strip() or None,
-            smtp_password=values["-SMTPPASS-"].strip() or None,
+            smtp_password=password_value or env_password,
             dry_run=values["-DRYRUN-"],
             log_level=values["-LOGLEVEL-"] or None,
         )

@@ -218,7 +218,7 @@ def run_program(params: RunParams) -> int:
             "Considere usar o prompt interativo ou a variável de ambiente SMTP_PASSWORD."
         )
 
-    smtp_password = params.smtp_password
+    smtp_password = params.smtp_password or os.getenv("SMTP_PASSWORD")
     if smtp_password is None:
         smtp_password = getpass.getpass(
             prompt="SMTP password (app password recommended): "
