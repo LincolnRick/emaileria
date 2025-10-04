@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import getpass
 import re
@@ -16,13 +17,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid, parseaddr
-from jinja2 import Environment, StrictUndefined, Template
-from jinja2.exceptions import TemplateError, UndefinedError
-
 import pandas as pd
 
 from emaileria.datasource.excel import load_contacts as load_contacts_dataframe
-from emaileria.templating import extract_placeholders
+from emaileria.templating import TemplateRenderingError, extract_placeholders, render
 
 
 CONTACT_PATTERNS = ("*.csv", "*.CSV", "*.xlsx", "*.XLSX")
@@ -34,7 +32,6 @@ BACKOFF_SECONDS = [1, 2, 4]
 SMTP_TIMEOUT = 30
 GLOBAL_PLACEHOLDERS = {"now", "hoje", "data_envio", "hora_envio"}
 
-PLACEHOLDER_RE = re.compile(r"'([^']+)' is undefined")
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
 
@@ -63,11 +60,16 @@ def print_header() -> None:
     )
 
 
-def extract_placeholder(message: str) -> Optional[str]:
-    match = PLACEHOLDER_RE.search(message)
-    if match:
-        return match.group(1)
-    return None
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Assistente interativo para envio de e-mails personalizados.",
+    )
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Permite placeholders ausentes, preenchendo com vazio e registrando avisos.",
+    )
+    return parser.parse_args(argv)
 
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
@@ -285,23 +287,41 @@ def html_to_snippet(html: str, limit: int = 200) -> str:
 
 
 def prepare_previews(
-    records: Sequence[Dict[str, Any]], subject_template: Template, body_template: Template
+    records: Sequence[Dict[str, Any]],
+    subject_template: str,
+    body_template: str,
+    *,
+    allow_missing: bool,
 ) -> List[Tuple[int, str, str, str]]:
     previews: List[Tuple[int, str, str, str]] = []
     for position, record in enumerate(records, start=1):
         context = record["context"]
+        missing_for_row: list[str] = []
+
+        def _handle_missing(name: str) -> None:
+            missing_for_row.append(name)
+
         try:
-            subject = subject_template.render(context)
-        except UndefinedError as exc:
+            subject, html_body = render(
+                subject_template,
+                body_template,
+                context,
+                allow_missing=allow_missing,
+                on_missing=_handle_missing if allow_missing else None,
+            )
+        except TemplateRenderingError as exc:
+            field = exc.template_type if exc.template_type in {"assunto", "corpo"} else "corpo"
             raise PlaceholderRenderError(
-                record["index"], "assunto", extract_placeholder(str(exc)), exc
+                record["index"], field, exc.placeholder, exc
             ) from exc
-        try:
-            html_body = body_template.render(context)
-        except UndefinedError as exc:
-            raise PlaceholderRenderError(
-                record["index"], "corpo", extract_placeholder(str(exc)), exc
-            ) from exc
+
+        if allow_missing and missing_for_row:
+            for placeholder in sorted(set(missing_for_row)):
+                print(
+                    f"[AVISO] Linha {record['index']}: placeholder '{placeholder}' ausente na prévia. "
+                    "Valor vazio utilizado."
+                )
+
         if position <= 3:
             previews.append((record["index"], record["email"], subject, html_body))
     return previews
@@ -332,10 +352,12 @@ def send_all(
     password: str,
     from_address: str,
     records: Sequence[Dict[str, Any]],
-    subject_template: Template,
-    body_template: Template,
+    subject_template: str,
+    body_template: str,
     interval: float,
     log_path: Path,
+    *,
+    allow_missing: bool,
 ) -> Dict[str, Any]:
     total = len(records)
     if total == 0:
@@ -362,18 +384,33 @@ def send_all(
                 for position, record in enumerate(records, start=1):
                     context = record["context"]
                     context.setdefault("posicao_envio", position)
+                    missing_for_row: list[str] = []
+
+                    def _handle_missing(name: str) -> None:
+                        missing_for_row.append(name)
+
                     try:
-                        subject = subject_template.render(context)
-                    except UndefinedError as exc:
+                        subject, html_body = render(
+                            subject_template,
+                            body_template,
+                            context,
+                            allow_missing=allow_missing,
+                            on_missing=_handle_missing if allow_missing else None,
+                        )
+                    except TemplateRenderingError as exc:
+                        field = (
+                            exc.template_type if exc.template_type in {"assunto", "corpo"} else "corpo"
+                        )
                         raise PlaceholderRenderError(
-                            record["index"], "assunto", extract_placeholder(str(exc)), exc
+                            record["index"], field, exc.placeholder, exc
                         ) from exc
-                    try:
-                        html_body = body_template.render(context)
-                    except UndefinedError as exc:
-                        raise PlaceholderRenderError(
-                            record["index"], "corpo", extract_placeholder(str(exc)), exc
-                        ) from exc
+
+                    if allow_missing and missing_for_row:
+                        for placeholder in sorted(set(missing_for_row)):
+                            print(
+                                f"[AVISO] Linha {record['index']}: placeholder '{placeholder}' ausente. "
+                                "Valor vazio utilizado."
+                            )
                     message = MIMEText(html_body, "html", "utf-8")
                     message["Subject"] = subject
                     message["From"] = from_address
@@ -433,7 +470,15 @@ def send_all(
     }
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    args = parse_args(argv)
+    allow_missing = bool(args.allow_missing)
+
     print_header()
     smtp_user = prompt_non_empty("SMTP User (e-mail do remetente): ")
     smtp_password = ""
@@ -523,22 +568,31 @@ def main() -> None:
         if placeholder.lower() not in normalized_columns | GLOBAL_PLACEHOLDERS
     )
     if missing_placeholders:
-        print("\nAs seguintes variáveis estão faltando na planilha:")
-        for name in missing_placeholders:
-            print(f"  - {name}")
-        print("Adicione as colunas na planilha ou remova os placeholders do template.")
-        sys.exit(1)
+        if allow_missing:
+            print("\nAviso: as seguintes variáveis não foram encontradas na planilha e serão preenchidas com vazio:")
+            for name in missing_placeholders:
+                print(f"  - {name}")
+        else:
+            print("\nAs seguintes variáveis estão faltando na planilha:")
+            for name in missing_placeholders:
+                print(f"  - {name}")
+            print("Adicione as colunas na planilha ou remova os placeholders do template.")
+            sys.exit(1)
 
-    env = Environment(undefined=StrictUndefined, autoescape=False, keep_trailing_newline=True)
     try:
-        subject_template = env.from_string(subject_text)
-        body_template = env.from_string(template_content)
-    except TemplateError as exc:
+        # Render com contexto vazio para validar sintaxe dos templates.
+        render(subject_text, template_content, {}, allow_missing=True)
+    except Exception as exc:  # pragma: no cover - erro tratado via CLI
         print(f"Erro ao preparar os templates Jinja2: {exc}", file=sys.stderr)
         sys.exit(1)
 
     try:
-        previews = prepare_previews(records, subject_template, body_template)
+        previews = prepare_previews(
+            records,
+            subject_text,
+            template_content,
+            allow_missing=allow_missing,
+        )
     except PlaceholderRenderError as exc:
         placeholder_text = f" '{exc.placeholder}'" if exc.placeholder else ""
         print(
@@ -573,10 +627,11 @@ def main() -> None:
             smtp_password,
             from_address,
             records,
-            subject_template,
-            body_template,
+            subject_text,
+            template_content,
             interval,
             log_path,
+            allow_missing=allow_missing,
         )
     except PlaceholderRenderError as exc:
         placeholder_text = f" '{exc.placeholder}'" if exc.placeholder else ""

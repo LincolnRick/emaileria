@@ -96,6 +96,7 @@ INTERACTIVE_KEYS = [
     "-HTML-BROWSE-",
     "-HTML-PREVIEW-",
     "-DRYRUN-",
+    "-ALLOWMISSING-",
     "-LOGLEVEL-",
     "-PREVIEW-",
     "-RUN-",
@@ -103,6 +104,19 @@ INTERACTIVE_KEYS = [
 ]
 
 progress_state: dict[str, int] = {"total": 0, "sent": 0}
+validation_passed = False
+
+_VALIDATION_RESET_EVENTS = {
+    "-EXCEL-",
+    "-SHEET-",
+    "-SENDER-",
+    "-SMTPUSER-",
+    "-SUBJECT-",
+    "-SUBJECTFILE-",
+    "-HTML-",
+    "-DRYRUN-",
+    "-ALLOWMISSING-",
+}
 
 
 def _set_controls_enabled(window: sg.Window, *, enabled: bool) -> None:
@@ -117,6 +131,8 @@ def _set_controls_enabled(window: sg.Window, *, enabled: bool) -> None:
                 element.update(state="disabled" if not enabled else "normal")
             except Exception:  # pylint: disable=broad-except
                 pass
+    if enabled:
+        _update_run_button_state(window)
 
 
 def _update_counter_display(window: sg.Window, *, unknown_total: bool = False) -> None:
@@ -127,6 +143,26 @@ def _update_counter_display(window: sg.Window, *, unknown_total: bool = False) -
     else:
         total_display = str(total)
     window["-COUNTER-"].update(f"{sent}/{total_display}")
+
+
+def _update_run_button_state(window: sg.Window) -> None:
+    run_button = window.AllKeysDict.get("-RUN-")
+    if run_button is None:
+        return
+    should_enable = validation_passed
+    try:
+        run_button.update(disabled=not should_enable)
+    except TypeError:
+        try:
+            run_button.update(state="disabled" if not should_enable else "normal")
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+
+def _set_validation_state(window: sg.Window, *, passed: bool) -> None:
+    global validation_passed  # pylint: disable=global-statement
+    validation_passed = passed
+    _update_run_button_state(window)
 
 
 def _set_running_state(window: sg.Window, *, running: bool) -> None:
@@ -304,11 +340,15 @@ def _prepare_run_params(
         else bool(values.get("-DRYRUN-", True))
     )
 
-    if not sender_value and not dry_run_value:
-        sg.popup_error("Informe o remetente (From).")
-        return None
-
     smtp_user_input = str(values.get("-SMTPUSER-", "")).strip()
+    if not dry_run_value:
+        if not sender_value:
+            sg.popup_error("Informe o remetente (From).")
+            return None
+        if not smtp_user_input:
+            sg.popup_error("Informe o SMTP User.")
+            return None
+
     smtp_user_value = smtp_user_input or sender_value
 
     password_input = str(values.get("-SMTPPASS-", "")).strip()
@@ -322,6 +362,7 @@ def _prepare_run_params(
         return None
 
     log_level_value = str(values.get("-LOGLEVEL-", "") or "INFO").strip() or "INFO"
+    allow_missing_value = bool(values.get("-ALLOWMISSING-", False))
 
     return RunParams(
         input_path=excel_path,
@@ -333,6 +374,7 @@ def _prepare_run_params(
         body_html=body_html,
         dry_run=dry_run_value,
         log_level=log_level_value,
+        allow_missing_fields=allow_missing_value,
     )
 
 
@@ -365,6 +407,11 @@ def _start_worker(window: sg.Window, params: RunParams, *, mode: str) -> None:
     append_log(window, f"[INFO] Modo: {mode_display}\n")
     append_log(window, password_line + "\n")
     append_log(window, f"[INFO] Log level: {params.log_level or 'INFO'}\n")
+    if params.allow_missing_fields:
+        append_log(
+            window,
+            "[INFO] Modo tolerante: placeholders ausentes serão preenchidos com vazio.\n",
+        )
 
     def _run() -> None:  # pragma: no cover - integração com UI
         try:
@@ -409,13 +456,20 @@ def _show_preview(params: RunParams) -> bool:
         if placeholder.lower() not in normalized_columns | GLOBAL_PLACEHOLDERS
     )
     if missing_placeholders:
-        formatted = "\n".join(f"• {name}" for name in missing_placeholders)
-        sg.popup_error(
-            "Variáveis ausentes no template:\n"
-            f"{formatted}\n\n"
-            "Adicione as colunas na planilha ou remova os placeholders do template."
-        )
-        return False
+        if params.allow_missing_fields:
+            for name in missing_placeholders:
+                logging.warning(
+                    "Placeholder '%s' não encontrado na planilha. Valor vazio será usado.",
+                    name,
+                )
+        else:
+            formatted = "\n".join(f"• {name}" for name in missing_placeholders)
+            sg.popup_error(
+                "Variáveis ausentes no template:\n"
+                f"{formatted}\n\n"
+                "Adicione as colunas na planilha ou remova os placeholders do template."
+            )
+            return False
 
     if dataframe.empty:
         sg.popup(
@@ -427,13 +481,30 @@ def _show_preview(params: RunParams) -> bool:
     previews: list[str] = []
     records = dataframe.to_dict(orient="records")
     for index, row in enumerate(records[:3], start=1):
+        missing_for_row: list[str] = []
+
+        def _handle_missing(placeholder: str) -> None:
+            missing_for_row.append(placeholder)
+
         try:
             rendered_subject, rendered_body = render(
-                params.subject_template, params.body_html, row
+                params.subject_template,
+                params.body_html,
+                row,
+                allow_missing=params.allow_missing_fields,
+                on_missing=_handle_missing if params.allow_missing_fields else None,
             )
         except TemplateRenderingError as exc:
             sg.popup_error(str(exc))
             return False
+
+        if params.allow_missing_fields and missing_for_row:
+            for placeholder in sorted(set(missing_for_row)):
+                logging.warning(
+                    "Linha %s: placeholder '%s' ausente na prévia. Valor vazio utilizado.",
+                    index,
+                    placeholder,
+                )
 
         plain_body = re.sub(r"<[^>]+>", "", rendered_body)
         plain_body = re.sub(r"\s+", " ", plain_body).strip()
@@ -507,11 +578,20 @@ layout = [
         ),
     ],
     [sg.HorizontalSeparator()],
-    [sg.Text("Remetente (From)"), sg.Input(key="-SENDER-", size=(40, 1))],
-    [sg.Text("SMTP User"), sg.Input(key="-SMTPUSER-", size=(40, 1))],
+    [
+        sg.Text("Remetente (From)"),
+        sg.Input(key="-SENDER-", size=(40, 1), enable_events=True),
+    ],
+    [
+        sg.Text("SMTP User"),
+        sg.Input(key="-SMTPUSER-", size=(40, 1), enable_events=True),
+    ],
     [sg.Text("SMTP Password"), sg.Input(key="-SMTPPASS-", password_char="*", size=(40, 1))],
     [sg.HorizontalSeparator()],
-    [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60, 1))],
+    [
+        sg.Text("Assunto (Jinja2)"),
+        sg.Input(key="-SUBJECT-", size=(60, 1), enable_events=True),
+    ],
     [
         sg.Text("Assunto por arquivo (.txt)"),
         sg.Input(key="-SUBJECTFILE-", enable_events=True, size=(60, 1)),
@@ -528,6 +608,15 @@ layout = [
             "Dry-run (não enviar, apenas pré-visualizar)",
             key="-DRYRUN-",
             default=True,
+            enable_events=True,
+        )
+    ],
+    [
+        sg.Checkbox(
+            "Permitir campos ausentes (preencher vazio)",
+            key="-ALLOWMISSING-",
+            default=False,
+            enable_events=True,
         )
     ],
     [
@@ -572,6 +661,7 @@ layout = [
 window = sg.Window("Emaileria — Envio de E-mails", layout, finalize=True)
 window["-COUNTER-"].update("0/0")
 _apply_saved_settings(window)
+_set_validation_state(window, passed=False)
 
 log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 queue_handler = QueueLogHandler(log_queue)
@@ -594,6 +684,9 @@ while True:
     if event in (sg.WIN_CLOSED, "-EXIT-"):
         _save_settings(values)
         break
+
+    if event in _VALIDATION_RESET_EVENTS:
+        _set_validation_state(window, passed=False)
 
     if event == "-EXCEL-":
         excel_path = values["-EXCEL-"].strip()
@@ -653,7 +746,11 @@ while True:
 
         if event == "-PREVIEW-" and not _show_preview(params):
             _set_running_state(window, running=False)
+            _set_validation_state(window, passed=False)
             continue
+
+        if event == "-PREVIEW-":
+            _set_validation_state(window, passed=True)
 
         mode = "preview" if event == "-PREVIEW-" else "run"
         _start_worker(window, params, mode=mode)
