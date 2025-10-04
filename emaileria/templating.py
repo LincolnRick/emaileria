@@ -27,6 +27,12 @@ class TemplateRenderingError(RuntimeError):
 _env = Environment(autoescape=False, undefined=StrictUndefined)
 
 
+def extract_placeholders(text: str) -> set[str]:
+    """Extract placeholder names from template-like text."""
+
+    return set(re.findall(r"{{\s*([a-zA-Z0-9_]+)\s*}}", text or ""))
+
+
 def _datefmt(value: object, fmt: str = "%Y-%m-%d") -> str:
     if value is None:
         return ""

@@ -20,16 +20,17 @@ except ImportError as exc:  # pragma: no cover - integração com UI
 else:
     IMPORT_ERROR = None
 
-from emaileria.templating import TemplateRenderingError, render
+from emaileria.templating import TemplateRenderingError, extract_placeholders, render
 
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
-PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_]+)\s*}}")
 SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
 PROCESSING_PATTERN = re.compile(
     r"Processando\s+(?P<processed>\d+)\s+contatos.*total[^0-9]*(?P<total>\d+)",
     re.IGNORECASE,
 )
+
+GLOBAL_PLACEHOLDERS = {"now", "hoje", "data_envio", "hora_envio"}
 
 current_sheets: list[str] = []
 
@@ -79,14 +80,6 @@ def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
     copy = df.copy()
     copy.columns = [str(column).strip().lower() for column in copy.columns]
     return copy
-
-
-def _extract_placeholders(*templates: str) -> set[str]:
-    placeholders: set[str] = set()
-    for template in templates:
-        if template:
-            placeholders.update(PLACEHOLDER_PATTERN.findall(template))
-    return placeholders
 
 
 INTERACTIVE_KEYS = [
@@ -406,13 +399,21 @@ def _show_preview(params: RunParams) -> bool:
         )
         return False
 
-    placeholders = _extract_placeholders(params.subject_template, params.body_html)
-    missing_placeholders = sorted(placeholders - set(dataframe.columns))
+    used_placeholders = extract_placeholders(
+        params.subject_template
+    ) | extract_placeholders(params.body_html)
+    normalized_columns = {str(column).strip().lower() for column in dataframe.columns}
+    missing_placeholders = sorted(
+        placeholder
+        for placeholder in used_placeholders
+        if placeholder.lower() not in normalized_columns | GLOBAL_PLACEHOLDERS
+    )
     if missing_placeholders:
-        formatted = ", ".join(missing_placeholders)
+        formatted = "\n".join(f"• {name}" for name in missing_placeholders)
         sg.popup_error(
-            "Planilha inválida. Colunas ausentes para placeholders: "
-            f"{formatted}."
+            "Variáveis ausentes no template:\n"
+            f"{formatted}\n\n"
+            "Adicione as colunas na planilha ou remova os placeholders do template."
         )
         return False
 
