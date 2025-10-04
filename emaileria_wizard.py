@@ -22,6 +22,7 @@ from jinja2.exceptions import TemplateError, UndefinedError
 import pandas as pd
 
 from emaileria.datasource.excel import load_contacts as load_contacts_dataframe
+from emaileria.templating import extract_placeholders
 
 
 CONTACT_PATTERNS = ("*.csv", "*.CSV", "*.xlsx", "*.XLSX")
@@ -31,6 +32,7 @@ DEFAULT_INTERVAL = 0.75
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = [1, 2, 4]
 SMTP_TIMEOUT = 30
+GLOBAL_PLACEHOLDERS = {"now", "hoje", "data_envio", "hora_envio"}
 
 PLACEHOLDER_RE = re.compile(r"'([^']+)' is undefined")
 TAG_RE = re.compile(r"<[^>]+>")
@@ -510,6 +512,22 @@ def main() -> None:
     subject_text = prompt_non_empty(
         "Assunto (placeholders Jinja2, ex.: {{ tratamento }} {{ nome }}): "
     )
+
+    used_placeholders = extract_placeholders(subject_text) | extract_placeholders(
+        template_content
+    )
+    normalized_columns = {str(column).strip().lower() for column in contacts_df.columns}
+    missing_placeholders = sorted(
+        placeholder
+        for placeholder in used_placeholders
+        if placeholder.lower() not in normalized_columns | GLOBAL_PLACEHOLDERS
+    )
+    if missing_placeholders:
+        print("\nAs seguintes variáveis estão faltando na planilha:")
+        for name in missing_placeholders:
+            print(f"  - {name}")
+        print("Adicione as colunas na planilha ou remova os placeholders do template.")
+        sys.exit(1)
 
     env = Environment(undefined=StrictUndefined, autoescape=False, keep_trailing_newline=True)
     try:
