@@ -27,7 +27,7 @@
     </div>
 
     <p>Conte conosco — nossa equipe está à disposição.</p>
-    <p class="footer">Emaileria — Exemplo de corpo HTML · {{ data_envio or "" }}</p>
+    <p class="footer">Emaileria — Exemplo de corpo HTML · {{ data_envio | default('') }}</p>
   </div>
 </body>
 </html>
