@@ -65,12 +65,20 @@ python email_sender.py leads.xlsx \
 Também é possível fornecer os conteúdos diretamente em linha, como no exemplo abaixo:
 
 ```bash
-python email_sender.py leads.xlsx \
-  --sender "seu-email@gmail.com" \
-  --smtp-user "seu-email@gmail.com" \
-  --smtp-password "sua-senha-de-app" \
+python email_sender.py leads.xlsx --sender "seu-email@gmail.com" \
+  --smtp-user "seu-email@gmail.com" --smtp-password "sua-senha-de-app" \
   --subject-template "Plano funerário especial para {{ nome }}" \
-  --body-template "$(cat template.html)"
+  --body-template-file template.html --dry-run
+```
+
+O exemplo acima funciona igualmente em shells Windows (PowerShell ou CMD),
+bastando remover as barras invertidas de continuação de linha caso prefira
+uma única linha:
+
+```powershell
+python email_sender.py leads.xlsx --sender "seu-email@gmail.com" --smtp-user "seu-email@gmail.com" `
+  --smtp-password "sua-senha-de-app" --subject-template "Plano funerário especial para {{ nome }}" `
+  --body-template-file template.html --dry-run
 ```
 
 Ao executar o comando, o script solicitará a senha SMTP (recomenda-se usar a senha de app). Você também pode informar as credenciais via linha de comando, como mostrado acima. As mensagens são enviadas utilizando `smtplib.SMTP_SSL` diretamente contra `smtp.gmail.com:465`, portanto não é necessário configurar nenhum projeto no Google Cloud.
