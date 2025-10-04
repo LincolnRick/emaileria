@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Tuple
+from datetime import date, datetime
+from typing import Dict, Mapping, Tuple
 
 from jinja2 import Environment, StrictUndefined, UndefinedError
 
@@ -26,6 +27,28 @@ class TemplateRenderingError(RuntimeError):
 _env = Environment(autoescape=False, undefined=StrictUndefined)
 
 
+def _datefmt(value: object, fmt: str = "%Y-%m-%d") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime(fmt)
+    return str(value)
+
+
+_env.filters["datefmt"] = _datefmt
+
+
+def _global_context() -> Dict[str, object]:
+    now = datetime.now()
+    today = date.today()
+    return {
+        "now": now,
+        "hoje": today,
+        "data_envio": today.strftime("%Y-%m-%d"),
+        "hora_envio": now.strftime("%H:%M"),
+    }
+
+
 def _extract_placeholder_name(error: UndefinedError) -> str:
     match = re.search(_PLACEHOLDER_PATTERN, str(error))
     if match:
@@ -33,7 +56,9 @@ def _extract_placeholder_name(error: UndefinedError) -> str:
     return str(error)
 
 
-def _render_template(template: str, context: Dict[str, str], template_type: str) -> str:
+def _render_template(
+    template: str, context: Mapping[str, object], template_type: str
+) -> str:
     try:
         return _env.from_string(template).render(**context)
     except UndefinedError as exc:  # pragma: no cover - defensive parsing
@@ -41,8 +66,11 @@ def _render_template(template: str, context: Dict[str, str], template_type: str)
         raise TemplateRenderingError(template_type, placeholder, exc) from exc
 
 
-def render(subject_template: str, body_template: str, context: Dict[str, str]) -> Tuple[str, str]:
+def render(
+    subject_template: str, body_template: str, context: Mapping[str, object]
+) -> Tuple[str, str]:
     """Render subject and body templates with the provided context."""
-    subject = _render_template(subject_template, context, "assunto")
-    body = _render_template(body_template, context, "corpo")
+    merged_context: Dict[str, object] = {**_global_context(), **dict(context)}
+    subject = _render_template(subject_template, merged_context, "assunto")
+    body = _render_template(body_template, merged_context, "corpo")
     return subject, body
