@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Emaileria — Exemplo</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; background:#f6f7fb; margin:0; padding:0; }
+    .container { max-width:640px; margin:0 auto; background:#ffffff; padding:24px; }
+    .title { font-size:22px; margin:0 0 8px; color:#0f172a; }
+    .muted { color:#475569; }
+    .box { background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin:16px 0; }
+    .footer { font-size:12px; color:#64748b; margin-top:24px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="title">Um Abraço de Cuidado</h1>
+    <p class="muted">{{ tratamento }} {{ nome }},</p>
+    <p>Estamos disponíveis para acolher e orientar sua família com sensibilidade e respeito,
+       incluindo apoio prático e, se desejarem, o direcionamento transparente a planos funerários.</p>
+
+    <div class="box">
+      <p><strong>Proposta:</strong> {{ produto }}</p>
+      <p><strong>Cidade:</strong> {{ cidade }}</p>
+      <p><strong>Validade desta proposta:</strong> {{ validade }}</p>
+    </div>
+
+    <p>Conte conosco — nossa equipe está à disposição.</p>
+    <p class="footer">Emaileria — Exemplo de corpo HTML · {{ data_envio or "" }}</p>
+  </div>
+</body>
+</html>

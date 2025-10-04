@@ -1,0 +1,1 @@
+Um abraço de cuidado para {{ tratamento }} {{ nome }} em {{ cidade }}
