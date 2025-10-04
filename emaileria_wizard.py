@@ -14,11 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import pandas as pd
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid, parseaddr
 from jinja2 import Environment, StrictUndefined, Template
 from jinja2.exceptions import TemplateError, UndefinedError
+
+import pandas as pd
+
+from emaileria.datasource.excel import load_contacts as load_contacts_dataframe
 
 
 CONTACT_PATTERNS = ("*.csv", "*.CSV", "*.xlsx", "*.XLSX")
@@ -197,14 +200,14 @@ def choose_excel_sheet(path: Path) -> str:
 
 def load_contacts(path: Path, sheet: Optional[str] = None) -> pd.DataFrame:
     try:
-        if path.suffix.lower() == ".csv":
-            df = pd.read_csv(path, sep=None, engine="python")
-        else:
-            df = pd.read_excel(path, sheet_name=sheet)
+        df = load_contacts_dataframe(path, sheet)
+    except FileNotFoundError as exc:  # pragma: no cover - erro tratado via CLI
+        raise RuntimeError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - erro tratado via CLI
-        raise RuntimeError(f"Não foi possível carregar '{format_path_for_display(path)}': {exc}") from exc
+        raise RuntimeError(
+            f"Não foi possível carregar '{format_path_for_display(path)}': {exc}"
+        ) from exc
     df = df.dropna(how="all")
-    df.columns = [str(col).strip() for col in df.columns]
     return df
 
 

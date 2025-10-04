@@ -25,12 +25,26 @@ def test_load_contacts_preserves_optional_case(tmp_path, monkeypatch):
         ]
     )
     excel_path = tmp_path / "contacts.xlsx"
+    excel_path.touch()
 
-    def fake_read_excel(path, sheet_name=None):
-        assert path == excel_path
-        assert sheet_name is None
+    class FakeExcelFile:
+        def __init__(self, path):
+            assert path == excel_path
+            self.sheet_names = ["Sheet1"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    def fake_read_excel(path, sheet_name=None, dtype=None):
+        assert isinstance(path, FakeExcelFile)
+        assert sheet_name == "Sheet1"
+        assert dtype is str
         return contacts.copy()
 
+    monkeypatch.setattr(pd, "ExcelFile", FakeExcelFile)
     monkeypatch.setattr(pd, "read_excel", fake_read_excel)
 
     loaded = load_contacts(excel_path)
