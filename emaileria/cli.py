@@ -8,6 +8,7 @@ import datetime as _dt
 import getpass
 import html
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Iterable
@@ -532,9 +533,11 @@ def main(argv: list[str] | None = None) -> None:
             "Considere usar o prompt interativo ou a variável de ambiente SMTP_PASSWORD."
         )
 
-    smtp_password = args.smtp_password or getpass.getpass(
-        prompt="SMTP password (app password recommended): "
-    )
+    smtp_password = args.smtp_password or os.getenv("SMTP_PASSWORD")
+    if smtp_password is None:
+        smtp_password = getpass.getpass(
+            prompt="SMTP password (app password recommended): "
+        )
 
     with SMTPProvider(
         config.SMTP_HOST,

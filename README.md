@@ -107,47 +107,70 @@ O assistente faz perguntas passo a passo sobre os arquivos envolvidos no envio, 
 
 ## Interface gráfica (GUI)
 
-Instale dependências (incluindo PySimpleGUI):
+A interface gráfica dispensa qualquer interação com a linha de comando. Depois de instalar as dependências (ver seção [Pré-requisitos](#pré-requisitos)), siga estes passos:
 
-```bash
-pip install -r requirements.txt
-```
+1. (Opcional) Ative o ambiente virtual que você criou anteriormente.
+2. Na raiz do projeto, execute:
 
-Rode a interface:
+   ```bash
+   python gui.py
+   ```
 
-```bash
-python gui.py
-```
+   No Windows, é possível dar dois cliques em `gui.py` caso a associação com Python esteja configurada. O terminal será aberto automaticamente e mostrará os logs da aplicação.
 
-Preencha os campos e clique Enviar.
-O log mostrará exatamente o que email_sender.py está fazendo (suporta --dry-run).
+### Preenchendo os campos
 
-### Gerar executável com PyInstaller
+A janela apresenta campos simples para serem preenchidos na ordem sugerida abaixo:
 
-**Windows**
+1. **Planilha (XLSX/CSV)** – escolha a planilha com os contatos. Você pode usar o exemplo `examples/readme/leads.csv` para testar o fluxo.
+2. **Aba (sheet)** – informe o nome da aba caso não esteja usando a primeira aba da planilha (deixe em branco para usar a padrão).
+3. **Remetente (From)** – endereço de e-mail que aparecerá como remetente.
+4. **SMTP User** – usuário para autenticação SMTP. Normalmente é o mesmo do remetente.
+5. **SMTP Password** – senha de app do Gmail. O campo esconde os caracteres digitados. Deixe em branco para que o envio use a variável de ambiente `SMTP_PASSWORD` (caso definida) ou seja solicitado durante o processo.
+6. **Assunto (Jinja2)** – template do assunto. Use `examples/readme/template_assunto.txt` como referência.
+7. **Template HTML** – selecione o arquivo HTML com o corpo do e-mail (por exemplo, `examples/readme/template_corpo.html`). O conteúdo é lido na hora do envio, portanto você pode editar o arquivo e reenviar sem reiniciar a GUI.
+8. **Dry-run (não enviar, apenas pré-visualizar)** – marcado por padrão para simular o envio sem disparar mensagens reais. Desmarque quando estiver seguro.
+9. **Log level** – ajuste o detalhamento dos logs exibidos na área inferior.
 
-```bash
-pyinstaller --onefile --noconsole gui.py
-```
+Clique em **Enviar** para iniciar o processamento. A parte inferior da janela funciona como um terminal de log, mostrando o andamento do envio (ou da pré-visualização). Use o botão **Sair** para encerrar a aplicação com segurança.
 
-Saída: `dist/gui.exe`
+### Fluxo sem linha de comando
 
-Ícone opcional: `--icon assets/emaileria.ico`
+1. Abra a GUI (`python gui.py`).
+2. Selecione a planilha e os templates desejados.
+3. Revise os campos de autenticação SMTP.
+4. Escolha se deseja executar um dry-run ou enviar de fato.
+5. Clique em **Enviar** e acompanhe os logs até a conclusão. Qualquer erro será destacado em vermelho.
 
-**macOS (Intel/ARM)**
+## Gerando executável da GUI
 
-```bash
-pyinstaller --onefile --windowed gui.py
-```
+### Empacotando a GUI com PyInstaller
 
-Saída: `dist/gui`
+Execute os comandos abaixo a partir da raiz do repositório (com o ambiente virtual ativo e as dependências instaladas):
 
-Dica: templates HTML podem ficar numa pasta `templates/` ao lado do executável. Como o `gui.py` lê o arquivo escolhido pelo usuário, não é obrigatório empacotar assets.
+- **Windows**
+
+  ```bash
+  pyinstaller --onefile --noconsole gui.py
+  ```
+
+  O executável ficará em `dist/gui.exe`.
+
+- **macOS (Intel/ARM)**
+
+  ```bash
+  pyinstaller --onefile --windowed gui.py
+  ```
+
+  O aplicativo ficará em `dist/gui`.
+
+Após a build, copie a planilha e os templates (por exemplo, os de `examples/readme/`) para a mesma pasta do executável ou para qualquer local acessível pelo seletor de arquivos da GUI.
 
 ## Segurança
 
 - Prefira utilizar senhas de app em vez da senha principal da conta Gmail.
 - Guarde a planilha com os dados sensíveis em local seguro.
+- Nunca informe a senha SMTP diretamente na linha de comando. Utilize o campo **SMTP Password** da GUI ou defina a variável de ambiente `SMTP_PASSWORD` antes de iniciar os scripts.
 
 ## Gerando executável
 
