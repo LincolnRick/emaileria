@@ -122,13 +122,13 @@ A interface gráfica dispensa qualquer interação com a linha de comando. Depoi
 
 A janela apresenta campos simples para serem preenchidos na ordem sugerida abaixo:
 
-1. **Planilha (XLSX/CSV)** – escolha a planilha com os contatos. Você pode usar o exemplo `examples/readme/leads.csv` para testar o fluxo.
+1. **Planilha (XLSX/CSV)** – escolha a planilha com os contatos. Você pode usar o exemplo `examples/leads_exemplo.xlsx` para testar o fluxo.
 2. **Aba (sheet)** – informe o nome da aba caso não esteja usando a primeira aba da planilha (deixe em branco para usar a padrão).
 3. **Remetente (From)** – endereço de e-mail que aparecerá como remetente.
 4. **SMTP User** – usuário para autenticação SMTP. Normalmente é o mesmo do remetente.
 5. **SMTP Password** – senha de app do Gmail. O campo esconde os caracteres digitados. Deixe em branco para que o envio use a variável de ambiente `SMTP_PASSWORD` (caso definida) ou seja solicitado durante o processo.
-6. **Assunto (Jinja2)** – template do assunto. Use `examples/readme/template_assunto.txt` como referência.
-7. **Template HTML** – selecione o arquivo HTML com o corpo do e-mail (por exemplo, `examples/readme/template_corpo.html`). O conteúdo é lido na hora do envio, portanto você pode editar o arquivo e reenviar sem reiniciar a GUI.
+6. **Assunto (Jinja2)** – template do assunto. Use `examples/assunto_exemplo.txt` como referência.
+7. **Template HTML** – selecione o arquivo HTML com o corpo do e-mail (por exemplo, `examples/corpo_exemplo.html`). O conteúdo é lido na hora do envio, portanto você pode editar o arquivo e reenviar sem reiniciar a GUI.
 8. **Dry-run (não enviar, apenas pré-visualizar)** – marcado por padrão para simular o envio sem disparar mensagens reais. Desmarque quando estiver seguro.
 9. **Log level** – ajuste o detalhamento dos logs exibidos na área inferior.
 
@@ -164,7 +164,7 @@ Execute os comandos abaixo a partir da raiz do repositório (com o ambiente virt
 
   O aplicativo ficará em `dist/gui`.
 
-Após a build, copie a planilha e os templates (por exemplo, os de `examples/readme/`) para a mesma pasta do executável ou para qualquer local acessível pelo seletor de arquivos da GUI.
+Após a build, copie a planilha e os templates (por exemplo, `examples/leads_exemplo.xlsx`, `examples/assunto_exemplo.txt` e `examples/corpo_exemplo.html`) para a mesma pasta do executável ou para qualquer local acessível pelo seletor de arquivos da GUI.
 
 ## Segurança
 
