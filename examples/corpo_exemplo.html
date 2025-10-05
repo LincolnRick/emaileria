@@ -3,31 +3,62 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Emaileria — Exemplo</title>
+  <title>Parceria de Acolhimento</title>
   <style>
-    body { font-family: Arial, Helvetica, sans-serif; background:#f6f7fb; margin:0; padding:0; }
-    .container { max-width:640px; margin:0 auto; background:#ffffff; padding:24px; }
-    .title { font-size:22px; margin:0 0 8px; color:#0f172a; }
+    body { font-family: Arial, Helvetica, sans-serif; background:#f6f7fb; margin:0; padding:24px 0; color:#0f172a; }
+    .container { max-width:680px; margin:0 auto; background:#ffffff; padding:28px; border-radius:12px; border:1px solid #e2e8f0; }
+    .title { font-size:22px; margin:0 0 6px; color:#0f172a; }
     .muted { color:#475569; }
-    .box { background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin:16px 0; }
-    .footer { font-size:12px; color:#64748b; margin-top:24px; }
+    .pill { display:inline-block; font-size:12px; background:#eef2ff; color:#1e40af; border:1px solid #c7d2fe; padding:6px 10px; border-radius:999px; margin:8px 0 16px; }
+    .box { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:16px; margin:16px 0; }
+    .list { margin:0; padding-left:18px; }
+    .cta-row { display:flex; gap:12px; margin-top:16px; flex-wrap:wrap; }
+    .cta-whats { display:inline-block; text-decoration:none; background:#25D366; color:#fff; padding:12px 16px; border-radius:10px; border:1px solid #128C7E; font-weight:bold; }
+    .cta-pdf { display:inline-block; text-decoration:none; background:#0f172a; color:#fff; padding:12px 16px; border-radius:10px; border:1px solid #0b1220; }
+    .hr { border:none; border-top:1px solid #e2e8f0; margin:20px 0; }
+    .footer { font-size:12px; color:#64748b; margin-top:12px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1 class="title">Um Abraço de Cuidado</h1>
-    <p class="muted">{{ tratamento }} {{ nome }},</p>
-    <p>Estamos disponíveis para acolher e orientar sua família com sensibilidade e respeito,
-       incluindo apoio prático e, se desejarem, o direcionamento transparente a planos funerários.</p>
+    <span class="pill">Parceria • Continuidade do cuidado</span>
+    <h1 class="title">Olá, {{ tratamento | default('') }} {{ nome | default('') }}!</h1>
+    <p class="muted">Sou {{ remetente | default('da equipe ABM Assistência Funerária') }}, e escrevo para apresentar uma parceria que
+      amplia o cuidado às famílias atendidas por {{ clinica | default('sua unidade') }} em {{ cidade | default('sua região') }}.</p>
 
     <div class="box">
-      <p><strong>Proposta:</strong> {{ produto }}</p>
-      <p><strong>Cidade:</strong> {{ cidade }}</p>
-      <p><strong>Validade desta proposta:</strong> {{ validade }}</p>
+      <p><strong>Por que essa parceria faz sentido?</strong></p>
+      <ul class="list">
+        <li><strong>Acolhimento humanizado 24h</strong>: equipe preparada para escuta e orientação, com linguagem sensível e clara.</li>
+        <li><strong>Burocracia resolvida</strong>: documentação, remoção, SP-Regula e encaminhamentos tratados no local.</li>
+        <li><strong>Conformidade e transparência</strong>: alinhado às tabelas oficiais e às regras de gratuidades (BPC, CadÚnico, doadores de órgãos).</li>
+        <li><strong>Impacto operacional</strong>: liberação mais rápida de leitos e menos ruídos no pós-óbito.</li>
+      </ul>
     </div>
 
-    <p>Conte conosco — nossa equipe está à disposição.</p>
-    <p class="footer">Emaileria — Exemplo de corpo HTML · {{ data_envio | default('') }}</p>
+    <div class="box">
+      <p><strong>Apresentação</strong></p>
+      <p>Segue em <strong>anexo</strong> o PDF <em>{{ pdf_nome | default('A importância do acolhimento') }}</em>.
+         Você também pode acessar pelo botão abaixo.</p>
+    </div>
+
+    <p>Podemos apresentar tudo em uma conversa breve e ajustar ao fluxo de {{ clinica | default('sua unidade') }}.</p>
+
+    <div class="cta-row">
+      <!-- WhatsApp fixo -->
+      <a class="cta-whats"
+         href="https://wa.me/5511937547713?text=Ol%C3%A1%2C%20podemos%20falar%20sobre%20a%20parceria%20de%20acolhimento%3F"
+         target="_blank" rel="noopener noreferrer">Falar no WhatsApp</a>
+
+      <!-- Botão do PDF: usa sua URL do Drive por padrão -->
+      <a class="cta-pdf"
+         href="{{ pdf_url | default('https://drive.google.com/uc?export=download&id=1SsPW5c6fLUAd10kFQNmyGPiOIa01FnBc') }}"
+         target="_blank" rel="noopener">Baixar apresentação (PDF)</a>
+    </div>
+
+    <hr class="hr" />
+    <p class="muted" style="margin:0;">Fico à disposição para esclarecer qualquer ponto.</p>
+    <p class="footer">Enviado em {{ data_envio | default('') }} · {{ remetente_email | default('') }} · {{ telefone | default('') }}</p>
   </div>
 </body>
 </html>
