@@ -12,8 +12,10 @@ import PySimpleGUI as sg
 
 try:
     from email_sender import RunParams, load_contacts, run_program
+    import email_sender as email_sender_module
 except ImportError as exc:  # pragma: no cover - integração com UI
     IMPORT_ERROR: Optional[Exception] = exc
+    email_sender_module = None  # type: ignore[assignment]
     RunParams = None  # type: ignore[assignment]
     load_contacts = None  # type: ignore[assignment]
     run_program = None  # type: ignore[assignment]
@@ -21,7 +23,6 @@ else:
     IMPORT_ERROR = None
 
 from emaileria.templating import TemplateRenderingError, extract_placeholders, render
-
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
 SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
@@ -31,11 +32,12 @@ PROCESSING_PATTERN = re.compile(
 )
 
 GLOBAL_PLACEHOLDERS = {"now", "hoje", "data_envio", "hora_envio"}
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 current_sheets: list[str] = []
 
 
-def _load_settings() -> dict[str, str]:
+def _load_settings() -> dict[str, object]:
     if not SETTINGS_PATH.exists():
         return {}
     try:
@@ -44,7 +46,7 @@ def _load_settings() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(key): str(value) for key, value in data.items() if isinstance(value, str)}
+    return data
 
 
 def _save_settings(values: Mapping[str, object] | None) -> None:
@@ -56,9 +58,19 @@ def _save_settings(values: Mapping[str, object] | None) -> None:
         "html": str(values.get("-HTML-", "") or ""),
         "sheet": str(values.get("-SHEET-", "") or ""),
         "sender": str(values.get("-SENDER-", "") or ""),
+        "smtp_user": str(values.get("-SMTPUSER-", "") or ""),
+        "log_level": str(values.get("-LOGLEVEL-", "INFO") or "INFO"),
+        "dry_run": bool(values.get("-DRYRUN-", True)),
+        "interval": float(values.get("-INTERVAL-", 0.75) or 0.0),
+        "cc": str(values.get("-CC-", "") or ""),
+        "bcc": str(values.get("-BCC-", "") or ""),
+        "reply_to": str(values.get("-REPLYTO-", "") or ""),
+        "subject_file": str(values.get("-SUBJECTFILE-", "") or ""),
     }
     try:
-        SETTINGS_PATH.write_text(json.dumps(relevant, ensure_ascii=False, indent=2), encoding="utf-8")
+        SETTINGS_PATH.write_text(
+            json.dumps(relevant, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     except OSError:
         logging.getLogger(__name__).debug("Não foi possível salvar as preferências da GUI.")
 
@@ -82,6 +94,27 @@ def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
     return copy
 
 
+def _parse_email_list(raw_value: str) -> list[str]:
+    if not raw_value:
+        return []
+    normalized = raw_value.replace("\n", ",")
+    entries = [part.strip() for part in re.split(r"[;,]", normalized) if part.strip()]
+    invalid = [entry for entry in entries if not EMAIL_PATTERN.match(entry)]
+    if invalid:
+        raise ValueError("Endereços de e-mail inválidos: " + ", ".join(invalid))
+    return entries
+
+
+def _strip_html(text: str) -> str:
+    plain = re.sub(r"<[^>]+>", "", text or "")
+    plain = re.sub(r"\s+", " ", plain)
+    return plain.strip()
+
+
+def _update_interval_display(window: sg.Window, value: float) -> None:
+    window["-INTERVAL-LABEL-"].update(f"{value:.2f}s")
+
+
 INTERACTIVE_KEYS = [
     "-EXCEL-",
     "-EXCEL-BROWSE-",
@@ -89,6 +122,9 @@ INTERACTIVE_KEYS = [
     "-SENDER-",
     "-SMTPUSER-",
     "-SMTPPASS-",
+    "-CC-",
+    "-BCC-",
+    "-REPLYTO-",
     "-SUBJECT-",
     "-SUBJECTFILE-",
     "-SUBJECTFILE-BROWSE-",
@@ -96,9 +132,9 @@ INTERACTIVE_KEYS = [
     "-HTML-BROWSE-",
     "-HTML-PREVIEW-",
     "-DRYRUN-",
-    "-ALLOWMISSING-",
     "-LOGLEVEL-",
-    "-PREVIEW-",
+    "-INTERVAL-",
+    "-VALIDATE-",
     "-RUN-",
     "-EXIT-",
 ]
@@ -115,7 +151,9 @@ _VALIDATION_RESET_EVENTS = {
     "-SUBJECTFILE-",
     "-HTML-",
     "-DRYRUN-",
-    "-ALLOWMISSING-",
+    "-CC-",
+    "-BCC-",
+    "-REPLYTO-",
 }
 
 
@@ -167,17 +205,19 @@ def _set_validation_state(window: sg.Window, *, passed: bool) -> None:
 
 def _set_running_state(window: sg.Window, *, running: bool) -> None:
     progress_bar = window["-PROGRESS-"]
+    cancel_button = window["-CANCEL-"]
     if running:
         progress_state["total"] = 0
         progress_state["sent"] = 0
         _set_controls_enabled(window, enabled=False)
         window["-STATUS-"].update("Processando...")
-        progress_bar.update(current_count=0, visible=True)
+        progress_bar.update(current_count=0, max=1, visible=True)
         _update_counter_display(window, unknown_total=True)
         try:
             progress_bar.Widget.start(10)
         except Exception:  # pylint: disable=broad-except
             pass
+        cancel_button.update(disabled=False)
         return
 
     try:
@@ -187,6 +227,7 @@ def _set_running_state(window: sg.Window, *, running: bool) -> None:
     progress_bar.update(visible=False)
     window["-STATUS-"].update("Pronto")
     _set_controls_enabled(window, enabled=True)
+    cancel_button.update(disabled=True)
     if progress_state["total"] == 0:
         window["-COUNTER-"].update("0/0")
     else:
@@ -198,23 +239,53 @@ def _apply_saved_settings(window: sg.Window) -> None:
     if not settings:
         return
 
-    excel_path = settings.get("excel", "")
+    excel_path = str(settings.get("excel", "") or "")
     if excel_path:
         window["-EXCEL-"].update(excel_path)
         if Path(excel_path).exists():
             _update_sheet_combo(window, excel_path)
 
-    sheet_value = settings.get("sheet", "")
+    sheet_value = str(settings.get("sheet", "") or "")
     if sheet_value and sheet_value in current_sheets:
         window["-SHEET-"].update(value=sheet_value)
 
-    html_path = settings.get("html", "")
+    html_path = str(settings.get("html", "") or "")
     if html_path:
         window["-HTML-"].update(html_path)
 
-    sender_value = settings.get("sender", "")
+    sender_value = str(settings.get("sender", "") or "")
     if sender_value:
         window["-SENDER-"].update(sender_value)
+
+    smtp_user = str(settings.get("smtp_user", "") or "")
+    if smtp_user:
+        window["-SMTPUSER-"].update(smtp_user)
+
+    cc_value = str(settings.get("cc", "") or "")
+    bcc_value = str(settings.get("bcc", "") or "")
+    reply_value = str(settings.get("reply_to", "") or "")
+    if cc_value:
+        window["-CC-"].update(cc_value)
+    if bcc_value:
+        window["-BCC-"].update(bcc_value)
+    if reply_value:
+        window["-REPLYTO-"].update(reply_value)
+
+    interval_value = settings.get("interval")
+    if isinstance(interval_value, (int, float)):
+        window["-INTERVAL-"].update(value=float(interval_value))
+        _update_interval_display(window, float(interval_value))
+
+    log_level = str(settings.get("log_level", "INFO") or "INFO")
+    window["-LOGLEVEL-"].update(log_level)
+
+    dry_run_state = settings.get("dry_run")
+    if isinstance(dry_run_state, bool):
+        window["-DRYRUN-"].update(dry_run_state)
+
+    subject_file = str(settings.get("subject_file", "") or "")
+    if subject_file:
+        window["-SUBJECTFILE-"].update(subject_file)
 
 
 def _handle_progress_from_log(window: sg.Window, message: str) -> None:
@@ -226,6 +297,13 @@ def _handle_progress_from_log(window: sg.Window, message: str) -> None:
             progress_state["total"] = 0
         progress_state["sent"] = 0
         _update_counter_display(window, unknown_total=progress_state["total"] == 0)
+        if progress_state["total"] > 0:
+            try:
+                progress_bar = window["-PROGRESS-"]
+                progress_bar.update(current_count=0, max=progress_state["total"], visible=True)
+                progress_bar.Widget.stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
         return
 
     if "Prepared email to" in message:
@@ -239,17 +317,24 @@ def _handle_progress_from_log(window: sg.Window, message: str) -> None:
             window,
             unknown_total=progress_state.get("total", 0) == 0,
         )
+        if progress_state.get("total", 0) > 0:
+            try:
+                progress_bar = window["-PROGRESS-"]
+                progress_bar.update(current_count=progress_state["sent"])
+            except Exception:  # pylint: disable=broad-except
+                pass
+
 
 def _update_sheet_combo(window: sg.Window, file_path: str) -> None:
     sheet_element = window["-SHEET-"]
     sheet_element.update(values=[], value="", disabled=True)
-    global current_sheets
+    global current_sheets  # pylint: disable=global-statement
     current_sheets = []
     if not file_path:
         return
 
     suffix = Path(file_path).suffix.lower()
-    if suffix != ".xlsx":
+    if suffix not in {".xlsx", ".xls"}:
         return
 
     try:
@@ -295,7 +380,7 @@ def _prepare_run_params(
     if RunParams is None:
         return None
 
-    excel_path = str(values.get("-EXCEL-", "")).strip()
+    excel_path = str(values.get("-EXCEL-", "") or "").strip()
     if not excel_path:
         sg.popup_error("Selecione a planilha (XLSX/CSV).")
         return None
@@ -303,8 +388,16 @@ def _prepare_run_params(
         sg.popup_error("Arquivo de planilha não encontrado. Verifique o caminho informado.")
         return None
 
-    subject_template = str(values.get("-SUBJECT-", "")).strip()
-    subject_file_path = str(values.get("-SUBJECTFILE-", "")).strip()
+    sheet_value_raw = str(values.get("-SHEET-", "") or "").strip()
+    sheet_value = sheet_value_raw or None
+    if sheet_value and current_sheets and sheet_value not in current_sheets:
+        sg.popup_error(
+            "A aba selecionada não foi encontrada. Recarregue a planilha e tente novamente."
+        )
+        return None
+
+    subject_template = str(values.get("-SUBJECT-", "") or "").strip()
+    subject_file_path = str(values.get("-SUBJECTFILE-", "") or "").strip()
     if subject_file_path:
         try:
             subject_template = Path(subject_file_path).read_text(encoding="utf-8").strip()
@@ -319,7 +412,7 @@ def _prepare_run_params(
         sg.popup_error("Informe o assunto (template).")
         return None
 
-    body_html_path = str(values.get("-HTML-", "")).strip()
+    body_html_path = str(values.get("-HTML-", "") or "").strip()
     body_html = _read_html_template(body_html_path)
     if body_html is None:
         return None
@@ -327,91 +420,175 @@ def _prepare_run_params(
         sg.popup_error("O arquivo de template HTML está vazio.")
         return None
 
-    sheet_value_raw = str(values.get("-SHEET-", "") or "").strip()
-    sheet_value = sheet_value_raw or None
-    if sheet_value and current_sheets and sheet_value not in current_sheets:
-        sg.popup_error("A aba selecionada não foi encontrada. Recarregue a planilha e tente novamente.")
-        return None
-
-    sender_value = str(values.get("-SENDER-", "")).strip()
     dry_run_value = (
-        dry_run_override
-        if dry_run_override is not None
-        else bool(values.get("-DRYRUN-", True))
+        dry_run_override if dry_run_override is not None else bool(values.get("-DRYRUN-", True))
     )
 
-    smtp_user_input = str(values.get("-SMTPUSER-", "")).strip()
+    sender_value = str(values.get("-SENDER-", "") or "").strip()
+    smtp_user_input = str(values.get("-SMTPUSER-", "") or "").strip()
+    smtp_user_value = smtp_user_input or sender_value
+
     if not dry_run_value:
         if not sender_value:
             sg.popup_error("Informe o remetente (From).")
             return None
-        if not smtp_user_input:
+        if not smtp_user_value:
             sg.popup_error("Informe o SMTP User.")
             return None
 
-    smtp_user_value = smtp_user_input or sender_value
-
-    password_input = str(values.get("-SMTPPASS-", "")).strip()
-    env_password = os.getenv("SMTP_PASSWORD", "")
-    password_to_use = password_input or env_password
-
-    if not dry_run_value and not password_to_use:
-        sg.popup_error(
-            "Informe a senha SMTP ou defina a variável de ambiente SMTP_PASSWORD."
-        )
+    try:
+        cc_list = _parse_email_list(str(values.get("-CC-", "") or ""))
+        bcc_list = _parse_email_list(str(values.get("-BCC-", "") or ""))
+    except ValueError as exc:
+        sg.popup_error(str(exc))
         return None
 
-    log_level_value = str(values.get("-LOGLEVEL-", "") or "INFO").strip() or "INFO"
-    allow_missing_value = bool(values.get("-ALLOWMISSING-", False))
+    reply_to_raw = str(values.get("-REPLYTO-", "") or "").strip()
+    reply_to_value: str | None = None
+    if reply_to_raw:
+        if not EMAIL_PATTERN.match(reply_to_raw):
+            sg.popup_error("Reply-To inválido. Informe um endereço de e-mail válido.")
+            return None
+        reply_to_value = reply_to_raw
+
+    interval_raw = values.get("-INTERVAL-", 0.75)
+    try:
+        interval_value = float(interval_raw)
+    except (TypeError, ValueError):
+        interval_value = 0.75
+    interval_value = max(0.0, min(2.0, interval_value))
+
+    log_level_value = str(values.get("-LOGLEVEL-", "INFO") or "INFO").strip().upper()
+    if log_level_value not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+        log_level_value = "INFO"
+
+    password_input = str(values.get("-SMTPPASS-", "") or "").strip()
+    if not dry_run_value and not (password_input or os.getenv("SMTP_PASSWORD", "").strip()):
+        sg.popup_error("Informe a senha SMTP ou defina a variável de ambiente SMTP_PASSWORD.")
+        return None
+
+    values["-SUBJECT-"] = subject_template
 
     return RunParams(
         input_path=excel_path,
         sheet=sheet_value,
         sender=sender_value,
-        smtp_user=smtp_user_value or sender_value,
-        smtp_password=password_to_use,
+        smtp_user=smtp_user_value,
+        smtp_password=password_input,
         subject_template=subject_template,
         body_html=body_html,
         dry_run=dry_run_value,
         log_level=log_level_value,
-        allow_missing_fields=allow_missing_value,
+        cc=cc_list or None,
+        bcc=bcc_list or None,
+        reply_to=reply_to_value,
+        interval_seconds=interval_value,
     )
 
 
-def _start_worker(window: sg.Window, params: RunParams, *, mode: str) -> None:
+def _validate_and_preview(window: sg.Window, values: dict[str, object]) -> bool:
+    if load_contacts is None:
+        sg.popup_error("Função de carregamento indisponível. Verifique a instalação.")
+        return False
+
+    params = _prepare_run_params(values, dry_run_override=True)
+    if params is None:
+        return False
+
+    window["-SUBJECT-"].update(params.subject_template)
+
+    try:
+        dataframe = load_contacts(params.input_path, params.sheet)
+    except ValueError as exc:
+        sg.popup_error(str(exc))
+        return False
+
+    dataframe = _normalize_headers(dataframe)
+
+    missing_required = sorted(REQUIRED_COLUMNS - set(dataframe.columns))
+    if missing_required:
+        sg.popup_error(
+            "Planilha inválida. Colunas obrigatórias ausentes: " + ", ".join(missing_required)
+        )
+        return False
+
+    used_placeholders = extract_placeholders(params.subject_template) | extract_placeholders(
+        params.body_html
+    )
+    available_placeholders = {column.lower() for column in dataframe.columns} | {
+        name.lower() for name in GLOBAL_PLACEHOLDERS
+    }
+    missing_placeholders = sorted(
+        placeholder
+        for placeholder in used_placeholders
+        if placeholder.lower() not in available_placeholders
+    )
+    if missing_placeholders:
+        formatted = "\n".join(f"• {name}" for name in missing_placeholders)
+        sg.popup_error(
+            "Variáveis ausentes no template:\n"
+            f"{formatted}\n\n"
+            "Adicione as colunas na planilha ou ajuste o template."
+        )
+        return False
+
+    if dataframe.empty:
+        sg.popup_error("A planilha não possui registros para envio.")
+        return False
+
+    previews: list[str] = []
+    sample_records = dataframe.head(3).to_dict(orient="records")
+    for index, row in enumerate(sample_records, start=1):
+        cleaned_row = {key: ("" if pd.isna(value) else value) for key, value in row.items()}
+        try:
+            rendered_subject, rendered_body = render(
+                params.subject_template,
+                params.body_html,
+                cleaned_row,
+            )
+        except TemplateRenderingError as exc:
+            sg.popup_error(str(exc))
+            return False
+
+        snippet = _strip_html(rendered_body)[:200]
+        previews.append(
+            f"Amostra {index}\nAssunto: {rendered_subject}\nCorpo: {snippet}"
+        )
+
+    preview_text = "\n\n".join(previews)
+    sg.popup_scrolled(preview_text, title="Prévia", size=(80, 15))
+    return True
+
+
+def _start_worker(window: sg.Window, params: RunParams) -> None:
     if run_program is None:
         sg.popup_error("Função de execução indisponível. Verifique a instalação.")
         return
 
     global worker_thread  # pylint: disable=global-statement
 
-    action_label = "prévia" if mode == "preview" else "envio"
-    append_log(window, f"\n[INFO] Iniciando {action_label}\n")
+    if email_sender_module is not None and hasattr(email_sender_module, "reset_cancel_flag"):
+        try:
+            email_sender_module.reset_cancel_flag()
+        except Exception:  # pylint: disable=broad-except
+            pass
 
-    sheet_display = params.sheet or "(padrão)"
-    sender_display = params.sender or "(não informado)"
-    smtp_user_display = params.smtp_user or sender_display
+    append_log(window, "\n[INFO] Iniciando execução\n")
+    append_log(window, f"[INFO] Planilha: {params.input_path}\n")
+    append_log(window, f"[INFO] Sheet: {params.sheet or '(padrão)'}\n")
+    append_log(window, f"[INFO] Remetente: {params.sender or '(não informado)'}\n")
+    append_log(window, f"[INFO] SMTP User: {params.smtp_user or '(não informado)'}\n")
+    if params.cc:
+        append_log(window, f"[INFO] CC: {', '.join(params.cc)}\n")
+    if params.bcc:
+        append_log(window, f"[INFO] BCC: {', '.join(params.bcc)}\n")
+    if params.reply_to:
+        append_log(window, f"[INFO] Reply-To: {params.reply_to}\n")
+    append_log(window, f"[INFO] Intervalo entre envios: {params.interval_seconds:.2f}s\n")
+    append_log(window, f"[INFO] Log level: {params.log_level}\n")
     mode_display = "Dry-run (sem envio real)" if params.dry_run else "Envio real"
-    password_line = "[INFO] Senha: ********" if params.smtp_password else "[INFO] Senha: (não informada)"
-
-    append_log(
-        window,
-        "[INFO] Planilha: {} | Sheet: {} | Remetente: {} | SMTP User: {}\n".format(
-            params.input_path,
-            sheet_display,
-            sender_display,
-            smtp_user_display,
-        ),
-    )
-    append_log(window, f"[INFO] Assunto: {params.subject_template}\n")
     append_log(window, f"[INFO] Modo: {mode_display}\n")
-    append_log(window, password_line + "\n")
-    append_log(window, f"[INFO] Log level: {params.log_level or 'INFO'}\n")
-    if params.allow_missing_fields:
-        append_log(
-            window,
-            "[INFO] Modo tolerante: placeholders ausentes serão preenchidos com vazio.\n",
-        )
+    append_log(window, f"[INFO] Assunto: {params.subject_template}\n")
 
     def _run() -> None:  # pragma: no cover - integração com UI
         try:
@@ -419,106 +596,10 @@ def _start_worker(window: sg.Window, params: RunParams, *, mode: str) -> None:
         except Exception as exc:  # pylint: disable=broad-except
             log_queue.put(("ERROR", f"Falha durante a execução: {exc}\n"))
         else:
-            log_queue.put(("RESULT", f"{mode}:{result_code}"))
+            log_queue.put(("RESULT", str(result_code)))
 
     worker_thread = threading.Thread(target=_run, daemon=True)
     worker_thread.start()
-
-
-def _show_preview(params: RunParams) -> bool:
-    if load_contacts is None:
-        sg.popup_error("Função de carregamento indisponível. Verifique a instalação.")
-        return False
-
-    try:
-        dataframe = load_contacts(params.input_path, params.sheet)
-    except Exception as exc:  # pylint: disable=broad-except
-        sg.popup_error(f"Erro ao carregar planilha: {exc}")
-        return False
-
-    dataframe = _normalize_headers(dataframe)
-
-    missing_required = sorted(REQUIRED_COLUMNS - set(dataframe.columns))
-    if missing_required:
-        formatted = ", ".join(missing_required)
-        sg.popup_error(
-            "Planilha inválida. Colunas obrigatórias ausentes: " f"{formatted}."
-        )
-        return False
-
-    used_placeholders = extract_placeholders(
-        params.subject_template
-    ) | extract_placeholders(params.body_html)
-    normalized_columns = {str(column).strip().lower() for column in dataframe.columns}
-    missing_placeholders = sorted(
-        placeholder
-        for placeholder in used_placeholders
-        if placeholder.lower() not in normalized_columns | GLOBAL_PLACEHOLDERS
-    )
-    if missing_placeholders:
-        if params.allow_missing_fields:
-            for name in missing_placeholders:
-                logging.warning(
-                    "Placeholder '%s' não encontrado na planilha. Valor vazio será usado.",
-                    name,
-                )
-        else:
-            formatted = "\n".join(f"• {name}" for name in missing_placeholders)
-            sg.popup_error(
-                "Variáveis ausentes no template:\n"
-                f"{formatted}\n\n"
-                "Adicione as colunas na planilha ou remova os placeholders do template."
-            )
-            return False
-
-    if dataframe.empty:
-        sg.popup(
-            "Planilha carregada, mas não há registros para pré-visualizar.",
-            title="Prévia",
-        )
-        return False
-
-    previews: list[str] = []
-    records = dataframe.to_dict(orient="records")
-    for index, row in enumerate(records[:3], start=1):
-        missing_for_row: list[str] = []
-
-        def _handle_missing(placeholder: str) -> None:
-            missing_for_row.append(placeholder)
-
-        try:
-            rendered_subject, rendered_body = render(
-                params.subject_template,
-                params.body_html,
-                row,
-                allow_missing=params.allow_missing_fields,
-                on_missing=_handle_missing if params.allow_missing_fields else None,
-            )
-        except TemplateRenderingError as exc:
-            sg.popup_error(str(exc))
-            return False
-
-        if params.allow_missing_fields and missing_for_row:
-            for placeholder in sorted(set(missing_for_row)):
-                logging.warning(
-                    "Linha %s: placeholder '%s' ausente na prévia. Valor vazio utilizado.",
-                    index,
-                    placeholder,
-                )
-
-        plain_body = re.sub(r"<[^>]+>", "", rendered_body)
-        plain_body = re.sub(r"\s+", " ", plain_body).strip()
-        plain_body = plain_body[:200]
-
-        previews.append(
-            "Amostra {index}\nAssunto: {subject}\nCorpo: {body}".format(
-                index=index, subject=rendered_subject, body=plain_body
-            )
-        )
-
-    preview_text = "\n\n".join(previews)
-    sg.popup_scrolled(preview_text, title="Prévia", non_blocking=False)
-    return True
 
 
 def _show_html_quick_preview(html_path: str) -> None:
@@ -563,8 +644,11 @@ sg.theme("SystemDefault")
 layout = [
     [
         sg.Text("Planilha (XLSX/CSV)"),
-        sg.Input(key="-EXCEL-", enable_events=True),
-        sg.FileBrowse(key="-EXCEL-BROWSE-", file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),)),
+        sg.Input(key="-EXCEL-", enable_events=True, size=(45, 1)),
+        sg.FileBrowse(
+            key="-EXCEL-BROWSE-",
+            file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),),
+        ),
     ],
     [
         sg.Text("Aba (sheet)"),
@@ -578,29 +662,29 @@ layout = [
         ),
     ],
     [sg.HorizontalSeparator()],
-    [
-        sg.Text("Remetente (From)"),
-        sg.Input(key="-SENDER-", size=(40, 1), enable_events=True),
-    ],
-    [
-        sg.Text("SMTP User"),
-        sg.Input(key="-SMTPUSER-", size=(40, 1), enable_events=True),
-    ],
+    [sg.Text("Remetente (From)"), sg.Input(key="-SENDER-", size=(40, 1), enable_events=True)],
+    [sg.Text("SMTP User"), sg.Input(key="-SMTPUSER-", size=(40, 1), enable_events=True)],
     [sg.Text("SMTP Password"), sg.Input(key="-SMTPPASS-", password_char="*", size=(40, 1))],
+    [sg.Text("CC"), sg.Input(key="-CC-", size=(60, 1), enable_events=True)],
+    [sg.Text("BCC"), sg.Input(key="-BCC-", size=(60, 1), enable_events=True)],
+    [sg.Text("Reply-To"), sg.Input(key="-REPLYTO-", size=(60, 1), enable_events=True)],
     [sg.HorizontalSeparator()],
-    [
-        sg.Text("Assunto (Jinja2)"),
-        sg.Input(key="-SUBJECT-", size=(60, 1), enable_events=True),
-    ],
+    [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60, 1), enable_events=True)],
     [
         sg.Text("Assunto por arquivo (.txt)"),
         sg.Input(key="-SUBJECTFILE-", enable_events=True, size=(60, 1)),
-        sg.FileBrowse(key="-SUBJECTFILE-BROWSE-", file_types=(("Texto", "*.txt;*.jinja;*.j2"),)),
+        sg.FileBrowse(
+            key="-SUBJECTFILE-BROWSE-",
+            file_types=(("Texto", "*.txt;*.jinja;*.j2"),),
+        ),
     ],
     [
         sg.Text("Template HTML"),
-        sg.Input(key="-HTML-", enable_events=True),
-        sg.FileBrowse(key="-HTML-BROWSE-", file_types=(("HTML", "*.html;*.htm;*.j2"),)),
+        sg.Input(key="-HTML-", enable_events=True, size=(60, 1)),
+        sg.FileBrowse(
+            key="-HTML-BROWSE-",
+            file_types=(("HTML", "*.html;*.htm;*.j2"),),
+        ),
         sg.Button("Preview", key="-HTML-PREVIEW-"),
     ],
     [
@@ -612,12 +696,17 @@ layout = [
         )
     ],
     [
-        sg.Checkbox(
-            "Permitir campos ausentes (preencher vazio)",
-            key="-ALLOWMISSING-",
-            default=False,
+        sg.Text("Intervalo entre envios (segundos)"),
+        sg.Slider(
+            range=(0.0, 2.0),
+            resolution=0.05,
+            default_value=0.75,
+            orientation="h",
+            key="-INTERVAL-",
             enable_events=True,
-        )
+            size=(30, 15),
+        ),
+        sg.Text("0.75s", key="-INTERVAL-LABEL-", size=(10, 1)),
     ],
     [
         sg.Text("Log level"),
@@ -627,12 +716,13 @@ layout = [
             key="-LOGLEVEL-",
             readonly=True,
             size=(15, 1),
+            enable_events=True,
         ),
     ],
     [sg.HorizontalSeparator()],
     [
         sg.ProgressBar(
-            max_value=100,
+            max_value=1,
             orientation="h",
             size=(40, 20),
             key="-PROGRESS-",
@@ -643,8 +733,9 @@ layout = [
         sg.Text("0/0", key="-COUNTER-", size=(10, 1)),
     ],
     [
-        sg.Button("Validar & Prévia", key="-PREVIEW-"),
-        sg.Button("Enviar", key="-RUN-", bind_return_key=True),
+        sg.Button("Validar & Prévia", key="-VALIDATE-"),
+        sg.Button("Enviar", key="-RUN-", bind_return_key=True, disabled=True),
+        sg.Button("Cancelar", key="-CANCEL-", disabled=True),
         sg.Button("Sair", key="-EXIT-"),
     ],
     [
@@ -659,8 +750,14 @@ layout = [
 ]
 
 window = sg.Window("Emaileria — Envio de E-mails", layout, finalize=True)
+_update_interval_display(window, float(window["-INTERVAL-"].DefaultValue))
 window["-COUNTER-"].update("0/0")
 _apply_saved_settings(window)
+try:
+    current_interval_value = float(window["-INTERVAL-"].Widget.get())
+except Exception:  # pylint: disable=broad-except
+    current_interval_value = float(window["-INTERVAL-"].DefaultValue)
+_update_interval_display(window, current_interval_value)
 _set_validation_state(window, passed=False)
 
 log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
@@ -678,6 +775,7 @@ if IMPORT_ERROR is not None:
         "[ERR] Não foi possível importar email_sender. Execute este programa a partir da raiz do projeto.\n",
         tag="ERR",
     )
+    append_log(window, f"[ERR] Detalhes: {IMPORT_ERROR}\n", tag="ERR")
 
 while True:
     event, values = window.read(timeout=100)
@@ -696,32 +794,47 @@ while True:
     if event == "-SHEET-":
         _save_settings(values)
 
+    if event in {"-SENDER-", "-SMTPUSER-", "-CC-", "-BCC-", "-REPLYTO-"}:
+        _save_settings(values)
+
     if event == "-HTML-":
         _save_settings(values)
 
-    if event == "-SENDER-":
+    if event == "-DRYRUN-":
+        _save_settings(values)
+
+    if event == "-LOGLEVEL-":
+        _save_settings(values)
+
+    if event == "-INTERVAL-":
+        try:
+            slider_value = float(values["-INTERVAL-"])
+        except (TypeError, ValueError):
+            slider_value = 0.75
+        _update_interval_display(window, slider_value)
         _save_settings(values)
 
     if event == "-SUBJECTFILE-":
-        subject_file_path = str(values.get("-SUBJECTFILE-", "")).strip()
+        subject_file_path = str(values.get("-SUBJECTFILE-", "") or "").strip()
         if subject_file_path and Path(subject_file_path).exists():
             try:
                 subject_text = Path(subject_file_path).read_text(encoding="utf-8").strip()
             except OSError as exc:
                 sg.popup_error(f"Erro ao ler o arquivo de assunto: {exc}")
-                continue
-            values["-SUBJECT-"] = subject_text
-            window["-SUBJECT-"].update(subject_text)
+            else:
+                values["-SUBJECT-"] = subject_text
+                window["-SUBJECT-"].update(subject_text)
+                _save_settings(values)
 
     if event == "-HTML-PREVIEW-":
-        html_path = str(values.get("-HTML-", "")).strip()
+        html_path = str(values.get("-HTML-", "") or "").strip()
         if not html_path:
             sg.popup_error("Selecione o arquivo de template HTML para visualizar.")
         else:
             _show_html_quick_preview(html_path)
         continue
 
-    if event in ("-PREVIEW-", "-RUN-"):
+    if event == "-VALIDATE-":
         if IMPORT_ERROR is not None:
             sg.popup_error(
                 "Não foi possível importar o módulo email_sender. "
@@ -729,31 +842,47 @@ while True:
                 f"Detalhes: {IMPORT_ERROR}"
             )
             continue
-
         if worker_thread is not None and worker_thread.is_alive():
             sg.popup_error("Já existe um envio em andamento. Aguarde a finalização.")
             continue
+        if _validate_and_preview(window, values):
+            _set_validation_state(window, passed=True)
+            _save_settings(values)
+        continue
 
-        dry_run_override = True if event == "-PREVIEW-" else None
-        params = _prepare_run_params(values, dry_run_override=dry_run_override)
+    if event == "-RUN-":
+        if IMPORT_ERROR is not None:
+            sg.popup_error(
+                "Não foi possível importar o módulo email_sender. "
+                "Execute este programa a partir da raiz do projeto.\n"
+                f"Detalhes: {IMPORT_ERROR}"
+            )
+            continue
+        if worker_thread is not None and worker_thread.is_alive():
+            sg.popup_error("Já existe um envio em andamento. Aguarde a finalização.")
+            continue
+        params = _prepare_run_params(values)
         if params is None:
             continue
-
         window["-SUBJECT-"].update(params.subject_template)
-        values["-SUBJECT-"] = params.subject_template
         _save_settings(values)
         _set_running_state(window, running=True)
+        _start_worker(window, params)
+        continue
 
-        if event == "-PREVIEW-" and not _show_preview(params):
-            _set_running_state(window, running=False)
-            _set_validation_state(window, passed=False)
-            continue
-
-        if event == "-PREVIEW-":
-            _set_validation_state(window, passed=True)
-
-        mode = "preview" if event == "-PREVIEW-" else "run"
-        _start_worker(window, params, mode=mode)
+    if event == "-CANCEL-":
+        if worker_thread is not None and worker_thread.is_alive():
+            append_log(window, "[INFO] Cancelamento solicitado. Aguarde a finalização.\n")
+            if email_sender_module is not None and hasattr(
+                email_sender_module, "request_cancel"
+            ):
+                try:
+                    email_sender_module.request_cancel()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+            window["-CANCEL-"].update(disabled=True)
+        else:
+            window["-CANCEL-"].update(disabled=True)
 
     try:
         while True:
@@ -766,19 +895,25 @@ while True:
                 worker_thread = None
                 _set_running_state(window, running=False)
             elif tag == "RESULT":
-                mode_label, separator, code = payload.partition(":")
-                if separator:
-                    description = "Prévia" if mode_label == "preview" else "Execução"
-                    result_code = code
-                else:
-                    description = "Execução"
-                    result_code = mode_label
-                append_log(
-                    window,
-                    f"\n[INFO] {description} finalizada com código {result_code}\n",
-                )
                 worker_thread = None
                 _set_running_state(window, running=False)
+                try:
+                    code = int(payload)
+                except (TypeError, ValueError):
+                    code = 1
+                if code == 0:
+                    append_log(
+                        window,
+                        "\n[INFO] Execução finalizada com sucesso (código 0)\n",
+                    )
+                elif code == 130:
+                    append_log(window, "\n[INFO] Execução cancelada pelo usuário.\n")
+                else:
+                    append_log(
+                        window,
+                        f"\n[ERR] Execução finalizada com código {code}\n",
+                        tag="ERR",
+                    )
     except queue.Empty:
         pass
 

@@ -45,11 +45,23 @@ class SMTPProvider(EmailProvider):
             self._smtp.login(self.username, self.password)
         return self._smtp
 
+    def _extract_recipients(self, message: Message) -> list[str]:
+        recipients: list[str] = []
+        for header in ("To", "Cc", "Bcc"):
+            header_value = message.get(header)
+            if not header_value:
+                continue
+            recipients.extend([addr.strip() for addr in header_value.split(",") if addr.strip()])
+        if message.get("Bcc"):
+            del message["Bcc"]
+        return recipients
+
     def send(self, message: Message) -> ResultadoEnvio:
         smtp = self._ensure_connection()
         to_address = message["To"]
+        recipients = self._extract_recipients(message) or [to_address]
         try:
-            refused = smtp.sendmail(message["From"], [to_address], message.as_string())
+            refused = smtp.sendmail(message["From"], recipients, message.as_string())
         except Exception as exc:  # pragma: no cover - network failure
             logger.exception("Failed to send message to %s", to_address)
             return ResultadoEnvio(destinatario=to_address, sucesso=False, erro=str(exc))
