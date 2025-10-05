@@ -6,6 +6,11 @@ import html
 import re
 
 
+def _resolve_url(index_path: str | Path) -> str:
+    path = Path(index_path).resolve()
+    return path.as_uri()
+
+
 def _strip_scripts(html_text: str) -> str:
     """Remove scripts e event handlers potencialmente inseguros."""
     html_text = re.sub(r"(?is)<script.*?>.*?</script>", "", html_text)
@@ -75,3 +80,42 @@ def build_preview_page(previews: list[dict], out_dir: Path | None = None) -> Pat
 </html>"""
     index.write_text(html_doc, encoding="utf-8")
     return index
+
+
+def open_preview_window(index_path: str | Path) -> None:
+    """Abre a página de prévia utilizando pywebview, com fallback para o navegador."""
+
+    target_url = _resolve_url(index_path)
+    try:
+        import webview  # type: ignore[import-not-found]
+
+        width: int | None = None
+        height: int | None = None
+        position: tuple[int, int] | None = None
+        try:
+            import PySimpleGUI as sg  # type: ignore[import-not-found]
+
+            screen_w, screen_h = sg.Window.get_screen_size()
+            width = int(screen_w * 0.70)
+            height = int(screen_h * 0.75)
+            position = ((screen_w - width) // 2, (screen_h - height) // 2)
+        except Exception:  # pragma: no cover - apenas ajustes de UX
+            width = 1024
+            height = 768
+            position = None
+
+        window_kwargs: dict[str, int | bool] = {
+            "width": width,
+            "height": height,
+            "resizable": True,
+        }
+        if position is not None:
+            window_kwargs["x"], window_kwargs["y"] = position
+
+        webview.create_window("Prévia", url=target_url, **window_kwargs)
+        webview.start()
+        return
+    except Exception:  # pragma: no cover - fallback para ambientes sem pywebview
+        import webbrowser
+
+        webbrowser.open(target_url)
