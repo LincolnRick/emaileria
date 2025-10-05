@@ -107,90 +107,61 @@ O assistente faz perguntas passo a passo sobre os arquivos envolvidos no envio, 
 
 ## Interface gráfica (GUI)
 
-A interface gráfica dispensa qualquer interação com a linha de comando. Depois de instalar as dependências (ver seção [Pré-requisitos](#pré-requisitos)), siga estes passos:
+A GUI permite configurar envios completos sem recorrer ao terminal. Depois de instalar as dependências (veja [Pré-requisitos](#pré-requisitos)), execute `python gui.py` na raiz do projeto. No Windows, também é possível abrir o arquivo com um duplo clique – o console exibirá os logs em tempo real.
 
-1. (Opcional) Ative o ambiente virtual que você criou anteriormente.
-2. Na raiz do projeto, execute:
+### Passo a passo rápido
 
-   ```bash
-   python gui.py
-   ```
+1. Selecione a planilha (**Planilha (XLSX/CSV)**). O seletor lista automaticamente os exemplos `examples/readme/leads_exemplo.xlsx` e outros arquivos recentes.
+2. Caso esteja usando um Excel, escolha a aba desejada (**Aba (sheet)**). Para CSV o campo permanece desabilitado.
+3. Preencha **Remetente (From)**, **SMTP User** e, se necessário, o campo **SMTP Password** (recomenda-se uma senha de app; o conteúdo não é exibido em lugar algum).
+4. Informe o **Assunto (Jinja2)** e escolha o **Template HTML**. Os arquivos `examples/readme/assunto_exemplo.txt` e `examples/readme/corpo_exemplo.html` aparecem na lista de sugestões.
+5. Defina os campos opcionais **CC**, **BCC** e **Reply-To** com listas separadas por vírgula.
+6. Ajuste o comportamento do envio: mantenha **Dry-run** marcado para apenas renderizar os e-mails, escolha o **Log level** e utilize o **Intervalo entre envios (s)** para aplicar rate limit (0 a 2 segundos, padrão 0,75s).
+7. Clique em **Validar & Prévia** para carregar a planilha, verificar placeholders obrigatórios e visualizar três amostras renderizadas (assunto + trecho do corpo). Somente após uma validação bem-sucedida o botão **Enviar** é habilitado.
+8. Inicie o envio real (ou dry-run) com **Enviar**. A barra de progresso e o contador exibem a evolução, enquanto o botão **Cancelar** permite interromper com segurança.
 
-   No Windows, é possível dar dois cliques em `gui.py` caso a associação com Python esteja configurada. O terminal será aberto automaticamente e mostrará os logs da aplicação.
+### Recursos da janela
 
-### Preenchendo os campos
+* **Validar & Prévia**: garante que as colunas `email`, `tratamento` e `nome` existam, sinaliza placeholders ausentes (considerando os globais `now`, `hoje`, `data_envio`, `hora_envio`) e abre um resumo scrollável com três mensagens de exemplo.
+* **Campos CC/BCC/Reply-To**: aceitam listas separadas por vírgula com validação básica, repassadas diretamente para o envio SMTP.
+* **Slider de intervalo**: define o tempo mínimo entre mensagens (0 a 2 segundos) e é respeitado inclusive nos reenvios via GUI.
+* **Barra de progresso + botão Cancelar**: exibem contagem de enviados/total e permitem abortar o envio via flag thread-safe, sem travamentos.
+* **Área de log integrada**: recebe todos os registros da aplicação (inclusive do módulo core) por meio de um `logging.Handler` dedicado, preservando a senha fora de qualquer resumo ou log.
 
-A janela apresenta campos simples para serem preenchidos na ordem sugerida abaixo:
+### Preferências e dicas
 
-1. **Planilha (XLSX/CSV)** – escolha a planilha com os contatos. Você pode usar o exemplo `examples/leads_exemplo.xlsx` para testar o fluxo.
-2. **Aba (sheet)** – informe o nome da aba caso não esteja usando a primeira aba da planilha (deixe em branco para usar a padrão).
-3. **Remetente (From)** – endereço de e-mail que aparecerá como remetente.
-4. **SMTP User** – usuário para autenticação SMTP. Normalmente é o mesmo do remetente.
-5. **SMTP Password** – senha de app do Gmail. O campo esconde os caracteres digitados. Deixe em branco para que o envio use a variável de ambiente `SMTP_PASSWORD` (caso definida) ou seja solicitado durante o processo.
-6. **Assunto (Jinja2)** – template do assunto. Use `examples/assunto_exemplo.txt` como referência.
-7. **Template HTML** – selecione o arquivo HTML com o corpo do e-mail (por exemplo, `examples/corpo_exemplo.html`). O conteúdo é lido na hora do envio, portanto você pode editar o arquivo e reenviar sem reiniciar a GUI.
-8. **Dry-run (não enviar, apenas pré-visualizar)** – marcado por padrão para simular o envio sem disparar mensagens reais. Desmarque quando estiver seguro.
-9. **Log level** – ajuste o detalhamento dos logs exibidos na área inferior.
+* As escolhas mais recentes ficam salvas em `~/.emaileria_gui.json` (planilha, sheet, template HTML, remetente, usuário SMTP, CC/BCC/Reply-To, nível de log, estado do dry-run e valor do intervalo).
+* Use os exemplos do diretório `examples/readme/` para testar rapidamente todo o fluxo.
+* Senhas nunca são exibidas na tela nem persistidas em disco. Para maior segurança, utilize uma senha de app e a variável de ambiente `SMTP_PASSWORD` sempre que possível.
 
-Clique em **Enviar** para iniciar o processamento. A parte inferior da janela funciona como um terminal de log, mostrando o andamento do envio (ou da pré-visualização). Use o botão **Sair** para encerrar a aplicação com segurança.
+## Gerando executável (.exe/.app)
 
-### Fluxo sem linha de comando
+O projeto inclui uma especificação `emaileria.spec` pronta para o PyInstaller, bem como alvos no `Makefile` que simplificam o processo:
 
-1. Abra a GUI (`python gui.py`).
-2. Selecione a planilha e os templates desejados.
-3. Revise os campos de autenticação SMTP.
-4. Escolha se deseja executar um dry-run ou enviar de fato.
-5. Clique em **Enviar** e acompanhe os logs até a conclusão. Qualquer erro será destacado em vermelho.
+```bash
+# Executa a GUI diretamente
+make gui
 
-## Gerando executável da GUI
+# Gera binário Windows (console oculto)
+make build-win
 
-### Empacotando a GUI com PyInstaller
+# Gera aplicativo macOS (modo windowed)
+make build-mac
+```
 
-Execute os comandos abaixo a partir da raiz do repositório (com o ambiente virtual ativo e as dependências instaladas):
+Os comandos acima utilizam `pyinstaller --clean --onefile` com base na configuração oficial. Os artefatos resultantes são gravados em `dist/` (por exemplo, `dist/emaileria.exe` no Windows).
 
-- **Windows**
+Antes de distribuir o executável:
 
-  ```bash
-  pyinstaller --onefile --noconsole gui.py
-  ```
+1. Crie/ative um ambiente virtual e instale as dependências de runtime e build (`pip install -r requirements.txt` e, se necessário, `pip install pyinstaller`).
+2. Gere a build desejada com o alvo apropriado.
+3. Empacote junto aos exemplos (`examples/readme/leads_exemplo.xlsx`, `examples/readme/assunto_exemplo.txt`, `examples/readme/corpo_exemplo.html`) ou disponibilize-os em uma pasta acessível ao usuário final.
 
-  O executável ficará em `dist/gui.exe`.
+### Boas práticas de segurança
 
-- **macOS (Intel/ARM)**
-
-  ```bash
-  pyinstaller --onefile --windowed gui.py
-  ```
-
-  O aplicativo ficará em `dist/gui`.
-
-Após a build, copie a planilha e os templates (por exemplo, `examples/leads_exemplo.xlsx`, `examples/assunto_exemplo.txt` e `examples/corpo_exemplo.html`) para a mesma pasta do executável ou para qualquer local acessível pelo seletor de arquivos da GUI.
-
-## Segurança
-
-- Prefira utilizar senhas de app em vez da senha principal da conta Gmail.
-- Guarde a planilha com os dados sensíveis em local seguro.
-- Nunca informe a senha SMTP diretamente na linha de comando. Utilize o campo **SMTP Password** da GUI ou defina a variável de ambiente `SMTP_PASSWORD` antes de iniciar os scripts.
-
-## Gerando executável
-
-1. Crie (ou reutilize) um ambiente virtual e instale as dependências de execução e de build:
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   pip install -r requirements-build.txt
-   ```
-
-2. Execute o script de build:
-
-   ```bash
-   ./scripts/build_executable.sh
-   ```
-
-Os binários gerados ficarão disponíveis em `dist/emaileria` e `dist/emaileria-wizard` (ou com extensão `.exe` no Windows).
-O primeiro corresponde ao envio automático via linha de comando, enquanto o segundo empacota o assistente interativo `emaileria_wizard.py`.
+* Utilize sempre senhas de app em vez da senha principal da conta.
+* Não compartilhe planilhas contendo dados sensíveis fora de ambientes confiáveis.
+* Evite fornecer a senha SMTP via linha de comando; prefira o campo dedicado na GUI ou a variável de ambiente `SMTP_PASSWORD`.
 
 ## Licença
 

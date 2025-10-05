@@ -9,7 +9,7 @@ import threading
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
@@ -184,11 +184,26 @@ def _prepare_context(row: Dict[str, object]) -> Dict[str, str]:
     return context
 
 
-def _create_message(sender: str, recipient: str, subject: str, body_html: str) -> MIMEMultipart:
+def _create_message(
+    sender: str,
+    recipient: str,
+    subject: str,
+    body_html: str,
+    *,
+    cc: Sequence[str] | None = None,
+    bcc: Sequence[str] | None = None,
+    reply_to: str | None = None,
+) -> MIMEMultipart:
     message = MIMEMultipart("alternative")
     message["To"] = recipient
     message["From"] = sender
     message["Subject"] = subject
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    if bcc:
+        message["Bcc"] = ", ".join(bcc)
+    if reply_to:
+        message["Reply-To"] = reply_to
     message.attach(MIMEText(body_html, "html", "utf-8"))
     return message
 
@@ -202,6 +217,11 @@ def send_messages(
     provider: EmailProvider | None = None,
     dry_run: bool = False,
     allow_missing_fields: bool = False,
+    interval_seconds: float = 0.0,
+    cc: Sequence[str] | None = None,
+    bcc: Sequence[str] | None = None,
+    reply_to: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> List[ResultadoEnvio]:
     """Render and optionally send messages for every contact."""
     if not dry_run and provider is None:
@@ -213,7 +233,13 @@ def send_messages(
 
     results: List[ResultadoEnvio] = []
 
+    normalized_cc = [addr for addr in (cc or []) if addr]
+    normalized_bcc = [addr for addr in (bcc or []) if addr]
+
     for index, row in enumerate(contacts, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("Envio interrompido pelo usuário após %s registros.", index - 1)
+            break
         row_position = index
         if isinstance(row, dict):
             if "__row_position__" in row:
@@ -231,13 +257,13 @@ def send_messages(
         def _handle_missing(placeholder: str) -> None:
             missing_for_row.append(placeholder)
 
+        render_kwargs = {}
+        if allow_missing_fields:
+            render_kwargs = {
+                "allow_missing": True,
+                "on_missing": _handle_missing,
+            }
         try:
-            render_kwargs = {}
-            if allow_missing_fields:
-                render_kwargs = {
-                    "allow_missing": True,
-                    "on_missing": _handle_missing,
-                }
             subject, body = render(
                 subject_template,
                 body_template,
@@ -246,13 +272,12 @@ def send_messages(
             )
         except TemplateRenderingError as exc:
             logger.error(
-                "Falha ao renderizar %s na linha %s: placeholder '%s' não encontrado. "
-                "Adicione a coluna correspondente na planilha ou ajuste o template.",
+                "Falha ao renderizar %s na linha %s: placeholder '%s' não encontrado.",
                 exc.template_type,
                 row_position,
                 exc.placeholder,
             )
-            raise SystemExit(1) from exc
+            raise
 
         if allow_missing_fields and missing_for_row:
             for placeholder in sorted(set(missing_for_row)):
@@ -269,11 +294,21 @@ def send_messages(
                 destinatario=context["email"], sucesso=True, assunto=subject
             )
             results.append(result)
-            continue
+        else:
+            message = _create_message(
+                sender,
+                context["email"],
+                subject,
+                body,
+                cc=normalized_cc,
+                bcc=normalized_bcc,
+                reply_to=reply_to,
+            )
+            result = _send_with_retries(provider, message, rate_limiter)
+            result.assunto = subject
+            results.append(result)
 
-        message = _create_message(sender, context["email"], subject, body)
-        result = _send_with_retries(provider, message, rate_limiter)
-        result.assunto = subject
-        results.append(result)
+        if interval_seconds > 0 and not (cancel_event is not None and cancel_event.is_set()):
+            time.sleep(interval_seconds)
 
     return results

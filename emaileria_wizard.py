@@ -24,7 +24,7 @@ from emaileria.templating import TemplateRenderingError, extract_placeholders, r
 
 
 CONTACT_PATTERNS = ("*.csv", "*.CSV", "*.xlsx", "*.XLSX")
-TEMPLATE_PATTERNS = ("*.html", "*.HTML", "*.htm", "*.HTM", "*.j2", "*.J2")
+TEMPLATE_PATTERNS = ("*.html", "*.HTML", "*.htm", "*.HTM", "*.j2", "*.J2", "*.txt", "*.TXT")
 REQUIRED_COLUMNS = ("email", "tratamento", "nome")
 DEFAULT_INTERVAL = 0.75
 MAX_ATTEMPTS = 3
@@ -506,6 +506,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if child.is_dir():
                 contact_dirs.append(child)
 
+    examples_dir = Path.cwd() / "examples"
+    readme_dir = examples_dir / "readme"
+    for directory in (examples_dir, readme_dir):
+        if directory.exists() and directory.is_dir():
+            contact_dirs.append(directory)
+
     contact_prompt = "\nSelecione o arquivo de contatos detectado ou informe o caminho manual:"
     contact_path = pick_from_list_or_path(
         contact_prompt, gather_candidates(CONTACT_PATTERNS, contact_dirs)
@@ -542,6 +548,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     templates_dir = Path.cwd() / "templates"
     if templates_dir.exists() and templates_dir.is_dir():
         template_dirs.append(templates_dir)
+
+    for directory in (examples_dir, readme_dir):
+        if directory.exists() and directory.is_dir():
+            template_dirs.append(directory)
 
     template_prompt = "Selecione o template de e-mail (HTML/Jinja2) ou informe o caminho manual:"
     template_path = pick_from_list_or_path(

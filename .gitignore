@@ -33,6 +33,7 @@ env/
 # PyInstaller
 *.manifest
 *.spec
+!emaileria.spec
 
 # Installer logs
 pip-log.txt

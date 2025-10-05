@@ -5,18 +5,21 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
-import getpass
 import logging
 import os
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
+import pandas as pd
+
 from emaileria import config
-from emaileria.datasource.excel import load_contacts
 from emaileria.providers.smtp import SMTPProvider
 from emaileria.sender import ResultadoEnvio, send_messages
+from emaileria.templating import TemplateRenderingError
 
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "80"))
 """Limite padrão de envios por minuto usado pelo token bucket."""
@@ -43,7 +46,14 @@ class RunParams:
     limit: int | None = None
     offset: int | None = None
     log_level: str | None = "INFO"
-    allow_missing_fields: bool = False
+    cc: list[str] | None = None
+    bcc: list[str] | None = None
+    reply_to: str | None = None
+    interval_seconds: float = 0.75
+
+
+_CANCEL_EVENT = threading.Event()
+"""Flag global utilizada para solicitar cancelamento seguro dos envios."""
 
 
 def _ensure_logs_dir() -> None:
@@ -152,13 +162,169 @@ def _summarize_results(results: List[ResultadoEnvio]) -> None:
     )
 
 
+def load_contacts(path: str | Path, sheet: str | None) -> pd.DataFrame:
+    """Carrega a planilha de contatos respeitando a aba informada."""
+
+    file_path = Path(path)
+    if not file_path.exists():
+        raise ValueError(f"Arquivo não encontrado: {file_path}")
+
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix == ".csv":
+            df = pd.read_csv(file_path)
+        elif suffix in {".xls", ".xlsx"}:
+            sheet_name: str | int | None
+            if sheet:
+                sheet_name = sheet
+            else:
+                sheet_name = 0
+            df = pd.read_excel(file_path, sheet_name=sheet_name)
+        else:
+            raise ValueError(
+                "Formato de arquivo não suportado. Utilize CSV ou XLSX."
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        raise ValueError(f"Erro ao carregar planilha: {exc}") from exc
+
+    if df is None:
+        raise ValueError("Planilha vazia ou não carregada corretamente.")
+
+    return df
+
+
+def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
+    copy = df.copy()
+    copy.columns = [str(column).strip().lower() for column in copy.columns]
+    return copy
+
+
+def _iter_contacts(df: pd.DataFrame, offset: int, limit: int | None) -> list[dict[str, object]]:
+    filtered = df.iloc[offset:]
+    if limit is not None:
+        filtered = filtered.iloc[:limit]
+
+    records: list[dict[str, object]] = []
+    for position, (_, row) in enumerate(filtered.iterrows()):
+        data = row.to_dict()
+        data["__row_position__"] = offset + position + 1
+        records.append(data)
+    return records
+
+
+def _mask_password(value: str | None) -> str:
+    if not value:
+        return "(não informado)"
+    return "*" * 8
+
+
+def request_cancel() -> None:
+    """Sinaliza para que o processamento seja cancelado."""
+
+    _CANCEL_EVENT.set()
+
+
+def reset_cancel_flag() -> None:
+    """Limpa a sinalização de cancelamento."""
+
+    _CANCEL_EVENT.clear()
+
+
+def _log_configuration(params: RunParams, total: int) -> None:
+    masked_password = _mask_password(params.smtp_password or os.getenv("SMTP_PASSWORD"))
+    logging.info("Planilha: %s", params.input_path)
+    logging.info("Sheet: %s", params.sheet or "(padrão)")
+    logging.info("Remetente: %s", params.sender or "(não informado)")
+    logging.info("SMTP User: %s", params.smtp_user or params.sender or "(não informado)")
+    logging.info("CC: %s", ", ".join(params.cc or []) or "(nenhum)")
+    logging.info("BCC: %s", ", ".join(params.bcc or []) or "(nenhum)")
+    logging.info("Reply-To: %s", params.reply_to or "(nenhum)")
+    logging.info("Modo: %s", "Dry-run" if params.dry_run else "Envio real")
+    logging.info("Intervalo entre envios: %.2fs", max(params.interval_seconds, 0.0))
+    logging.info("Senha SMTP: %s", masked_password)
+    logging.info("Total de contatos selecionados: %s", total)
+
+
+def _render_only(params: RunParams, records: list[dict[str, object]]) -> int:
+    try:
+        results = send_messages(
+            sender=params.sender,
+            contacts=records,
+            subject_template=params.subject_template,
+            body_template=params.body_html,
+            dry_run=True,
+            allow_missing_fields=False,
+            interval_seconds=0.0,
+            cc=params.cc,
+            bcc=params.bcc,
+            reply_to=params.reply_to,
+            cancel_event=_CANCEL_EVENT,
+        )
+    except TemplateRenderingError as exc:
+        logging.error(str(exc))
+        return 1
+    except SystemExit as exc:  # pragma: no cover - compatibilidade antiga
+        return int(exc.code or 1)
+
+    _summarize_results(results)
+    return 0
+
+
+def _send_real(params: RunParams, records: list[dict[str, object]]) -> int:
+    smtp_password = params.smtp_password.strip()
+    if not smtp_password:
+        env_password = os.getenv("SMTP_PASSWORD", "")
+        smtp_password = env_password.strip()
+
+    if not smtp_password:
+        logging.error(
+            "Senha SMTP não informada. Configure SMTP_PASSWORD ou forneça no parâmetro."
+        )
+        return 1
+
+    smtp_user = params.smtp_user.strip() or params.sender
+
+    try:
+        with SMTPProvider(
+            config.SMTP_HOST,
+            config.SMTP_PORT,
+            smtp_user,
+            smtp_password,
+            timeout=config.SMTP_TIMEOUT,
+        ) as provider:
+            results = send_messages(
+                sender=params.sender,
+                contacts=records,
+                subject_template=params.subject_template,
+                body_template=params.body_html,
+                provider=provider,
+                dry_run=False,
+                allow_missing_fields=False,
+                interval_seconds=max(params.interval_seconds, 0.0),
+                cc=params.cc,
+                bcc=params.bcc,
+                reply_to=params.reply_to,
+                cancel_event=_CANCEL_EVENT,
+            )
+    except TemplateRenderingError as exc:
+        logging.error(str(exc))
+        return 1
+    except SystemExit as exc:  # pragma: no cover - compatibilidade antiga
+        return int(exc.code or 1)
+    except Exception as exc:  # pragma: no cover - network/authentication issues
+        logging.error("Falha ao estabelecer conexão SMTP: %s", exc)
+        return 1
+
+    _persist_results(results)
+    return 0
+
+
 def run_program(params: RunParams) -> int:
     """Executa o envio de emails a partir dos parâmetros informados."""
 
+    reset_cancel_flag()
     os.environ.setdefault("RATE_LIMIT_PER_MINUTE", str(RATE_LIMIT_PER_MINUTE))
     _configure_logging(params.log_level or "INFO")
-
-    input_path = Path(params.input_path)
 
     offset = params.offset or 0
     if offset < 0:
@@ -171,102 +337,46 @@ def run_program(params: RunParams) -> int:
         return 1
 
     try:
-        contacts_df = load_contacts(input_path, params.sheet)
+        contacts_df = load_contacts(params.input_path, params.sheet)
     except ValueError as exc:
         logging.error(str(exc))
         return 1
 
-    total_contacts = len(contacts_df)
-    filtered_df = contacts_df.iloc[offset:]
-    if limit is not None:
-        filtered_df = filtered_df.iloc[:limit]
+    contacts_df = _normalize_headers(contacts_df)
+    required_columns = {"email", "tratamento", "nome"}
+    missing_columns = sorted(required_columns - set(contacts_df.columns))
+    if missing_columns:
+        logging.error(
+            "Planilha inválida. Colunas obrigatórias ausentes: %s",
+            ", ".join(missing_columns),
+        )
+        return 1
 
-    sampled_records: list[dict[str, object]] = []
-    for position, (_, row) in enumerate(filtered_df.iterrows()):
-        record = row.to_dict()
-        record["__row_position__"] = offset + position + 1
-        sampled_records.append(record)
+    records = _iter_contacts(contacts_df, offset, limit)
+    processed_count = len(records)
 
-    processed_count = len(sampled_records)
+    _log_configuration(params, processed_count)
+
+    if processed_count == 0:
+        logging.warning("Nenhum contato selecionado para processamento.")
+        return 0
 
     logging.info(
         "Processando %s contatos (total na planilha: %s)",
         processed_count,
-        total_contacts,
+        len(contacts_df),
     )
 
-    if params.allow_missing_fields:
-        logging.info(
-            "Modo tolerante ativo: placeholders ausentes serão preenchidos com vazio."
-        )
+    start_time = time.time()
+    exit_code = _render_only(params, records) if params.dry_run else _send_real(params, records)
 
-    smtp_user_value = params.smtp_user.strip()
-    smtp_user = smtp_user_value or params.sender
+    if _CANCEL_EVENT.is_set():
+        logging.warning("Processamento cancelado pelo usuário.")
+        return 130
 
-    if params.dry_run:
-        try:
-            results = send_messages(
-                sender=params.sender,
-                contacts=sampled_records,
-                subject_template=params.subject_template,
-                body_template=params.body_html,
-                dry_run=True,
-                allow_missing_fields=params.allow_missing_fields,
-            )
-        except SystemExit as exc:
-            return int(exc.code or 1)
-
-        _summarize_results(results)
-        logging.info(
-            "Pré-visualizados %s de %s registros (offset=%s, limit=%s)",
-            processed_count,
-            total_contacts,
-            offset,
-            limit if limit is not None else "None",
-        )
-        return 0
-
-    smtp_password_value = params.smtp_password.strip()
-
-    if smtp_password_value:
-        logging.warning(
-            "Por segurança, evite informar --smtp-password diretamente. "
-            "Considere usar o prompt interativo ou a variável de ambiente SMTP_PASSWORD."
-        )
-
-    smtp_password = smtp_password_value or os.getenv("SMTP_PASSWORD")
-    if smtp_password is None:
-        smtp_password = getpass.getpass(
-            prompt="SMTP password (app password recommended): "
-        )
-
-    try:
-        provider: Optional[SMTPProvider]
-        with SMTPProvider(
-            config.SMTP_HOST,
-            config.SMTP_PORT,
-            smtp_user,
-            smtp_password,
-            timeout=config.SMTP_TIMEOUT,
-        ) as provider:
-            try:
-                results = send_messages(
-                    sender=params.sender,
-                    contacts=sampled_records,
-                    subject_template=params.subject_template,
-                    body_template=params.body_html,
-                    provider=provider,
-                    dry_run=False,
-                    allow_missing_fields=params.allow_missing_fields,
-                )
-            except SystemExit as exc:
-                return int(exc.code or 1)
-    except Exception as exc:  # pragma: no cover - network/authentication issues
-        logging.error("Falha ao estabelecer conexão SMTP: %s", exc)
-        return 1
-
-    _persist_results(results)
-    return 0
+    elapsed = time.time() - start_time
+    logging.info("Execução concluída em %.2f segundos", elapsed)
+    return exit_code
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -419,6 +529,8 @@ __all__ = [
     "main",
     "RATE_LIMIT_PER_MINUTE",
     "load_contacts",
+    "request_cancel",
+    "reset_cancel_flag",
 ]
 
 
