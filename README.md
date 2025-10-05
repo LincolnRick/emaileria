@@ -118,7 +118,7 @@ Clique em **Validar & Prévia** para abrir uma janela com os e-mails renderizado
 1. Selecione a planilha (**Planilha (XLSX/CSV)**). O seletor lista automaticamente os exemplos `examples/readme/leads_exemplo.xlsx` e outros arquivos recentes.
 2. Caso esteja usando um Excel, escolha a aba desejada (**Aba (sheet)**). Para CSV o campo permanece desabilitado.
 3. Preencha **Remetente (From)**, **SMTP User** e, se necessário, o campo **SMTP Password** (recomenda-se uma senha de app; o conteúdo não é exibido em lugar algum).
-4. Informe o **Assunto (Jinja2)** e escolha o **Template HTML**. Os arquivos `examples/readme/assunto_exemplo.txt` e `examples/readme/corpo_exemplo.html` aparecem na lista de sugestões.
+4. Informe o **Assunto (Jinja2)** e escolha o **Template HTML**. Os arquivos `examples/readme/assunto_exemplo.txt` e `examples/readme/corpo_exemplo.html` aparecem na lista de sugestões. Utilize o botão **Prévia** ao lado do campo de template para abrir rapidamente a renderização do HTML com dados reais (quando a planilha estiver selecionada).
 5. Defina os campos opcionais **CC**, **BCC** e **Reply-To** com listas separadas por vírgula.
 6. Ajuste o comportamento do envio: mantenha **Dry-run** marcado para apenas renderizar os e-mails, escolha o **Log level** e utilize o **Intervalo entre envios (s)** para aplicar rate limit (0 a 2 segundos, padrão 0,75s).
 7. Clique em **Validar & Prévia** para carregar a planilha, verificar placeholders obrigatórios e abrir uma janela com três amostras renderizadas exatamente como chegarão aos destinatários. Somente após uma validação bem-sucedida o botão **Enviar** é habilitado.
@@ -126,7 +126,8 @@ Clique em **Validar & Prévia** para abrir uma janela com os e-mails renderizado
 
 ### Recursos da janela
 
-* **Validar & Prévia**: garante que as colunas `email`, `tratamento` e `nome` existam, sinaliza placeholders ausentes (considerando os globais `now`, `hoje`, `data_envio`, `hora_envio`) e gera uma página HTML com três cartões renderizados. A visualização usa uma janela embutida via pywebview; se o engine não estiver disponível, o arquivo abre automaticamente no navegador padrão.
+* **Prévia (ao lado do Template HTML)**: renderiza o template imediatamente como um e-mail real, usando até três linhas da planilha selecionada (ou placeholders vazios caso nenhuma planilha tenha sido informada). Ideal para conferir a diagramação enquanto edita o arquivo.
+* **Validar & Prévia**: garante que as colunas `email`, `tratamento` e `nome` existam, sinaliza placeholders ausentes (considerando os globais `now`, `hoje`, `data_envio`, `hora_envio`) e gera uma página HTML com três cartões renderizados após passar por todas as validações. A visualização usa uma janela embutida via pywebview; se o engine não estiver disponível, o arquivo abre automaticamente no navegador padrão.
 * **Abrir última prévia**: reabre a página HTML mais recente salva em `previews/`, permitindo comparar rapidamente versões renderizadas sem repetir a validação.
 * **Campos CC/BCC/Reply-To**: aceitam listas separadas por vírgula com validação básica, repassadas diretamente para o envio SMTP.
 * **Slider de intervalo**: define o tempo mínimo entre mensagens (0 a 2 segundos) e é respeitado inclusive nos reenvios via GUI.

@@ -56,7 +56,7 @@ else:
     IMPORT_ERROR = None
 
 from emaileria.templating import TemplateRenderingError, extract_placeholders, render
-from emaileria.preview import build_preview_page
+from emaileria.preview import build_preview_page, open_preview_window
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
 SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
@@ -220,7 +220,7 @@ INTERACTIVE_KEYS = [
     "-SUBJECTFILE-BROWSE-",
     "-HTML-",
     "-HTML-BROWSE-",
-    "-HTML-PREVIEW-",
+    "-TPLPREVIEW-",
     "-DRYRUN-",
     "-LOGLEVEL-",
     "-INTERVAL-",
@@ -283,31 +283,6 @@ def _update_run_button_state(window: sg.Window) -> None:
             run_button.update(state="disabled" if not should_enable else "normal")
         except Exception:  # pylint: disable=broad-except
             pass
-
-
-def open_preview_window(index_path: str | Path) -> None:
-    try:
-        import webview
-
-        # 70% da tela, centralizado
-        sw, sh = sg.Window.get_screen_size()
-        w, h = int(sw * 0.70), int(sh * 0.75)
-        x, y = (sw - w) // 2, (sh - h) // 2
-        webview.create_window(
-            "Prévia",
-            url=str(Path(index_path).resolve().as_uri()),
-            width=w,
-            height=h,
-            resizable=True,
-            x=x,
-            y=y,
-        )
-        webview.start()
-    except Exception:
-        import pathlib
-        import webbrowser
-
-        webbrowser.open(str(pathlib.Path(index_path).resolve().as_uri()))
 
 
 def _find_latest_preview() -> Path | None:
@@ -753,42 +728,6 @@ def _start_worker(window: sg.Window, params: RunParams) -> None:
     STATE.worker_thread.start()
 
 
-def _show_html_quick_preview(html_path: str) -> None:
-    content = _read_html_template(html_path)
-    if content is None:
-        return
-    stripped_content = content.strip()
-    if not stripped_content:
-        sg.popup_error("O arquivo de template HTML está vazio.")
-        return
-
-    first_line = stripped_content.splitlines()[0] if stripped_content else ""
-    preview_layout = [
-        [sg.Text("Primeira linha do template HTML:")],
-        [
-            sg.Multiline(
-                first_line,
-                size=(80, 5),
-                disabled=True,
-                autoscroll=False,
-                font=("Consolas", 10),
-            )
-        ],
-        [sg.Button("Fechar")],
-    ]
-    preview_window = sg.Window(
-        "Pré-visualização rápida do HTML",
-        preview_layout,
-        modal=True,
-        finalize=True,
-    )
-    while True:
-        event, _ = preview_window.read()
-        if event in (sg.WIN_CLOSED, "Fechar"):
-            break
-    preview_window.close()
-
-
 # -------- UI --------
 
 # ---- Dimensionamento proporcional à tela ----
@@ -865,7 +804,7 @@ layout = [
             button_text="Browse",
             size=(10, 1),
         ),
-        sg.Button("Preview", key="-HTML-PREVIEW-"),
+        sg.Button("Prévia", key="-TPLPREVIEW-", size=(10, 1)),
     ],
     [
         sg.Checkbox(
@@ -1025,12 +964,114 @@ while True:
                 window["-SUBJECT-"].update(subject_text)
                 _save_settings(values)
 
-    if event == "-HTML-PREVIEW-":
-        html_path = str(values.get("-HTML-", "") or "").strip()
-        if not html_path:
-            sg.popup_error("Selecione o arquivo de template HTML para visualizar.")
-        else:
-            _show_html_quick_preview(html_path)
+    if event == "-TPLPREVIEW-":
+        path_html = str(values.get("-HTML-", "") or "").strip()
+        path_excel = str(values.get("-EXCEL-", "") or "").strip()
+        sheet_raw = values.get("-SHEET-")
+        sheet = ""
+        if isinstance(sheet_raw, str):
+            sheet = sheet_raw.strip()
+        elif sheet_raw is not None:
+            sheet = str(sheet_raw).strip()
+        subject_tpl = str(values.get("-SUBJECT-", "") or "").strip() or "Prévia de Template"
+        sender = str(values.get("-SENDER-", "") or "").strip()
+        smtp_user = str(values.get("-SMTPUSER-", "") or "").strip()
+        _ = sender, smtp_user
+
+        if not path_html or not Path(path_html).exists():
+            sg.popup_error("Selecione um arquivo de Template HTML válido.")
+            continue
+
+        try:
+            previews_list: list[dict[str, object]] = []
+            body_html = Path(path_html).read_text(encoding="utf-8")
+
+            from jinja2 import Environment, Undefined
+
+
+            class SoftUndefined(Undefined):
+                def _fail_with_undefined_error(self, *args, **kwargs):  # type: ignore[override]
+                    return ""
+
+
+            env_preview = Environment(
+                undefined=SoftUndefined,
+                autoescape=False,
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+
+            from datetime import datetime, date
+
+
+            globals_ctx = {
+                "now": datetime.now(),
+                "hoje": date.today(),
+                "data_envio": date.today().strftime("%Y-%m-%d"),
+                "hora_envio": datetime.now().strftime("%H:%M"),
+            }
+
+            def render_preview(context: dict[str, object] | None) -> tuple[str, str]:
+                ctx = {**globals_ctx, **(context or {})}
+                rendered_subject = env_preview.from_string(subject_tpl).render(ctx)
+                rendered_html = env_preview.from_string(body_html).render(ctx)
+                return str(rendered_subject or ""), str(rendered_html or "")
+
+            rows_for_preview: list[dict[str, object]] = []
+            if path_excel and Path(path_excel).exists():
+                try:
+                    if load_contacts is None:
+                        raise ImportError("loader indisponível")
+                    dataframe = load_contacts(path_excel, sheet or None)
+                except Exception:
+                    data_path = Path(path_excel)
+                    if data_path.suffix.lower() == ".csv":
+                        dataframe = pd.read_csv(data_path, dtype=str).fillna("")
+                    else:
+                        if sheet:
+                            dataframe = pd.read_excel(
+                                data_path, sheet_name=sheet, dtype=str
+                            ).fillna("")
+                        else:
+                            excel_file = pd.ExcelFile(data_path)
+                            dataframe = pd.read_excel(
+                                excel_file, sheet_name=excel_file.sheet_names[0], dtype=str
+                            ).fillna("")
+                else:
+                    dataframe = dataframe.fillna("")
+
+                rows_for_preview = dataframe.head(3).to_dict(orient="records")
+
+            if not rows_for_preview:
+                rows_for_preview = [{}]
+
+            for idx, row in enumerate(rows_for_preview, start=1):
+                subj_rendered, html_rendered = render_preview(
+                    row if isinstance(row, dict) else {}
+                )
+                email_display = "(sem e-mail)"
+                if isinstance(row, dict):
+                    email_value = row.get("email", "")
+                    email_display = str(email_value or "") or "(sem e-mail)"
+                previews_list.append(
+                    {
+                        "idx": idx,
+                        "subject": subj_rendered,
+                        "body_html": html_rendered,
+                        "email": email_display,
+                    }
+                )
+
+            index = build_preview_page(previews_list)
+            STATE.last_preview_path = index
+            try:
+                open_preview_window(index)
+            except Exception:
+                import webbrowser
+
+                webbrowser.open(index.resolve().as_uri())
+        except Exception as exc:  # pylint: disable=broad-except
+            sg.popup_error(f"Falha ao gerar prévia do Template HTML:\n{exc}")
         continue
 
     if event == "-VALIDATE-":
