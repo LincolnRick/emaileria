@@ -3,3 +3,4 @@ openpyxl
 Jinja2
 certifi
 PySimpleGUI
+pywebview>=4.2

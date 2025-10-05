@@ -23,6 +23,7 @@ else:
     IMPORT_ERROR = None
 
 from emaileria.templating import TemplateRenderingError, extract_placeholders, render
+from emaileria.preview import build_preview_page
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
 SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
@@ -105,12 +106,6 @@ def _parse_email_list(raw_value: str) -> list[str]:
     return entries
 
 
-def _strip_html(text: str) -> str:
-    plain = re.sub(r"<[^>]+>", "", text or "")
-    plain = re.sub(r"\s+", " ", plain)
-    return plain.strip()
-
-
 def _update_interval_display(window: sg.Window, value: float) -> None:
     window["-INTERVAL-LABEL-"].update(f"{value:.2f}s")
 
@@ -136,11 +131,13 @@ INTERACTIVE_KEYS = [
     "-INTERVAL-",
     "-VALIDATE-",
     "-RUN-",
+    "-OPEN-LAST-PREVIEW-",
     "-EXIT-",
 ]
 
 progress_state: dict[str, int] = {"total": 0, "sent": 0}
 validation_passed = False
+last_preview_path: Path | None = None
 
 _VALIDATION_RESET_EVENTS = {
     "-EXCEL-",
@@ -195,6 +192,73 @@ def _update_run_button_state(window: sg.Window) -> None:
             run_button.update(state="disabled" if not should_enable else "normal")
         except Exception:  # pylint: disable=broad-except
             pass
+
+
+def _open_preview_page(index_path: Path, *, window: sg.Window | None = None) -> None:
+    resolved = index_path.resolve()
+    selection = sg.popup(
+        f"Gerado em: {resolved}",
+        title="Prévia gerada",
+        custom_text=("Abrir no navegador", "Ver na janela"),
+    )
+    if selection == "Abrir no navegador":
+        import webbrowser
+
+        webbrowser.open(resolved.as_uri())
+        return
+
+    try:
+        import webview
+    except Exception:
+        import webbrowser
+
+        webbrowser.open(resolved.as_uri())
+        return
+
+    try:
+        if window is not None:
+            window.disappear()
+        webview.create_window(
+            "Prévia",
+            url=str(resolved.as_uri()),
+            width=900,
+            height=720,
+        )
+        gui_hint = "cef" if getattr(webview, "platform", None) == "Windows" else None
+        webview.start(gui=gui_hint)
+    except Exception:
+        import webbrowser
+
+        webbrowser.open(resolved.as_uri())
+    finally:
+        if window is not None:
+            try:
+                window.reappear()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+def _find_latest_preview() -> Path | None:
+    base = Path("previews")
+    if not base.exists():
+        return None
+    try:
+        candidates = list(base.glob("*/index.html"))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    latest: Path | None = None
+    latest_mtime = float("-inf")
+    for candidate in candidates:
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > latest_mtime:
+            latest = candidate
+            latest_mtime = mtime
+    return latest
 
 
 def _set_validation_state(window: sg.Window, *, passed: bool) -> None:
@@ -536,8 +600,8 @@ def _validate_and_preview(window: sg.Window, values: dict[str, object]) -> bool:
         sg.popup_error("A planilha não possui registros para envio.")
         return False
 
-    previews: list[str] = []
     sample_records = dataframe.head(3).to_dict(orient="records")
+    previews: list[dict[str, str]] = []
     for index, row in enumerate(sample_records, start=1):
         cleaned_row = {key: ("" if pd.isna(value) else value) for key, value in row.items()}
         try:
@@ -550,13 +614,24 @@ def _validate_and_preview(window: sg.Window, values: dict[str, object]) -> bool:
             sg.popup_error(str(exc))
             return False
 
-        snippet = _strip_html(rendered_body)[:200]
         previews.append(
-            f"Amostra {index}\nAssunto: {rendered_subject}\nCorpo: {snippet}"
+            {
+                "idx": index,
+                "subject": str(rendered_subject or ""),
+                "body_html": str(rendered_body or ""),
+                "email": str(cleaned_row.get("email", "") or ""),
+            }
         )
 
-    preview_text = "\n\n".join(previews)
-    sg.popup_scrolled(preview_text, title="Prévia", size=(80, 15))
+    try:
+        index_path = build_preview_page(previews)
+    except OSError as exc:
+        sg.popup_error(f"Não foi possível criar a prévia: {exc}")
+        return False
+
+    global last_preview_path  # pylint: disable=global-statement
+    last_preview_path = index_path
+    _open_preview_page(index_path, window=window)
     return True
 
 
@@ -734,6 +809,7 @@ layout = [
     ],
     [
         sg.Button("Validar & Prévia", key="-VALIDATE-"),
+        sg.Button("Abrir última prévia", key="-OPEN-LAST-PREVIEW-"),
         sg.Button("Enviar", key="-RUN-", bind_return_key=True, disabled=True),
         sg.Button("Cancelar", key="-CANCEL-", disabled=True),
         sg.Button("Sair", key="-EXIT-"),
@@ -848,6 +924,18 @@ while True:
         if _validate_and_preview(window, values):
             _set_validation_state(window, passed=True)
             _save_settings(values)
+        continue
+
+    if event == "-OPEN-LAST-PREVIEW-":
+        global last_preview_path  # pylint: disable=global-statement
+        candidate = last_preview_path
+        if candidate is None or not candidate.exists():
+            candidate = _find_latest_preview()
+        if candidate is None or not candidate.exists():
+            sg.popup_error("Nenhuma prévia foi gerada ainda.")
+        else:
+            last_preview_path = candidate
+            _open_preview_page(candidate, window=window)
         continue
 
     if event == "-RUN-":
