@@ -11,6 +11,38 @@ from typing import Mapping, Optional
 import pandas as pd
 import PySimpleGUI as sg
 
+# ---- UX / DPI awareness ----
+import platform
+
+sg.theme("SystemDefault")
+sg.set_options(  # fontes e paddings consistentes
+    font=("Segoe UI", 10),
+    input_elements_background_color="#FAFCFF",
+    element_padding=(8, 6),
+    margins=(16, 12),
+    dpi_awareness=True,  # ajuda no Windows recente
+)
+
+
+def _enable_windows_dpi_awareness() -> None:
+    """Evita janela 'torta' (DPI scaling) no Windows."""
+
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+
+        PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+_enable_windows_dpi_awareness()
+
 try:
     from email_sender import RunParams, load_contacts, run_program
     import email_sender as email_sender_module
@@ -64,6 +96,17 @@ def _load_settings() -> dict[str, object]:
     return data
 
 
+def _write_settings(data: dict[str, object]) -> None:
+    try:
+        SETTINGS_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        logging.getLogger(__name__).debug(
+            "Não foi possível salvar as preferências da GUI."
+        )
+
+
 def _save_settings(values: Mapping[str, object] | None) -> None:
     if values is None:
         return
@@ -82,12 +125,50 @@ def _save_settings(values: Mapping[str, object] | None) -> None:
         "reply_to": str(values.get("-REPLYTO-", "") or ""),
         "subject_file": str(values.get("-SUBJECTFILE-", "") or ""),
     }
+    settings = _load_settings()
+    settings.update(relevant)
+    _write_settings(settings)
+
+
+def load_window_geometry() -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    settings = _load_settings()
+    size_raw = settings.get("win_size")
+    loc_raw = settings.get("win_loc")
+
+    size: tuple[int, int] | None
+    if (
+        isinstance(size_raw, (list, tuple))
+        and len(size_raw) == 2
+        and all(isinstance(item, (int, float)) for item in size_raw)
+    ):
+        size = (int(size_raw[0]), int(size_raw[1]))
+    else:
+        size = None
+
+    location: tuple[int, int] | None
+    if (
+        isinstance(loc_raw, (list, tuple))
+        and len(loc_raw) == 2
+        and all(isinstance(item, (int, float)) for item in loc_raw)
+    ):
+        location = (int(loc_raw[0]), int(loc_raw[1]))
+    else:
+        location = None
+
+    return size, location
+
+
+def save_window_geometry(win: sg.Window) -> None:
+    settings = _load_settings()
     try:
-        SETTINGS_PATH.write_text(
-            json.dumps(relevant, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        logging.getLogger(__name__).debug("Não foi possível salvar as preferências da GUI.")
+        size = win.size
+        loc = win.current_location()
+    except Exception:  # pylint: disable=broad-except
+        return
+
+    settings["win_size"] = list(size)
+    settings["win_loc"] = list(loc)
+    _write_settings(settings)
 
 
 def _read_html_template(path: str) -> str | None:
@@ -204,48 +285,29 @@ def _update_run_button_state(window: sg.Window) -> None:
             pass
 
 
-def _open_preview_page(index_path: Path, *, window: sg.Window | None = None) -> None:
-    resolved = index_path.resolve()
-    selection = sg.popup(
-        f"Gerado em: {resolved}",
-        title="Prévia gerada",
-        custom_text=("Abrir no navegador", "Ver na janela"),
-    )
-    if selection == "Abrir no navegador":
-        import webbrowser
-
-        webbrowser.open(resolved.as_uri())
-        return
-
+def open_preview_window(index_path: str | Path) -> None:
     try:
         import webview
-    except Exception:
-        import webbrowser
 
-        webbrowser.open(resolved.as_uri())
-        return
-
-    try:
-        if window is not None:
-            window.disappear()
+        # 70% da tela, centralizado
+        sw, sh = sg.Window.get_screen_size()
+        w, h = int(sw * 0.70), int(sh * 0.75)
+        x, y = (sw - w) // 2, (sh - h) // 2
         webview.create_window(
             "Prévia",
-            url=str(resolved.as_uri()),
-            width=900,
-            height=720,
+            url=str(Path(index_path).resolve().as_uri()),
+            width=w,
+            height=h,
+            resizable=True,
+            x=x,
+            y=y,
         )
-        gui_hint = "cef" if getattr(webview, "platform", None) == "Windows" else None
-        webview.start(gui=gui_hint)
+        webview.start()
     except Exception:
+        import pathlib
         import webbrowser
 
-        webbrowser.open(resolved.as_uri())
-    finally:
-        if window is not None:
-            try:
-                window.reappear()
-            except Exception:  # pylint: disable=broad-except
-                pass
+        webbrowser.open(str(pathlib.Path(index_path).resolve().as_uri()))
 
 
 def _find_latest_preview() -> Path | None:
@@ -647,7 +709,7 @@ def _validate_and_preview(window: sg.Window, values: dict[str, object]) -> bool:
         return False
 
     STATE.last_preview_path = index_path
-    _open_preview_page(index_path, window=window)
+    open_preview_window(index_path)
     return True
 
 
@@ -728,15 +790,28 @@ def _show_html_quick_preview(html_path: str) -> None:
 
 
 # -------- UI --------
-sg.theme("SystemDefault")
+
+# ---- Dimensionamento proporcional à tela ----
+screen_w, screen_h = sg.Window.get_screen_size()
+WIN_W = int(screen_w * 0.75)
+WIN_H = int(screen_h * 0.80)
+LOC_X = (screen_w - WIN_W) // 2
+LOC_Y = (screen_h - WIN_H) // 2
+
+saved_size, saved_loc = load_window_geometry()
+if saved_size and saved_loc:
+    WIN_W, WIN_H = saved_size
+    LOC_X, LOC_Y = saved_loc
 
 layout = [
     [
         sg.Text("Planilha (XLSX/CSV)"),
-        sg.Input(key="-EXCEL-", enable_events=True, size=(45, 1)),
+        sg.Input(key="-EXCEL-", enable_events=True, expand_x=True),
         sg.FileBrowse(
             key="-EXCEL-BROWSE-",
             file_types=(("Excel/CSV", "*.xlsx;*.xls;*.csv"),),
+            button_text="Browse",
+            size=(10, 1),
         ),
     ],
     [
@@ -751,28 +826,44 @@ layout = [
         ),
     ],
     [sg.HorizontalSeparator()],
-    [sg.Text("Remetente (From)"), sg.Input(key="-SENDER-", size=(40, 1), enable_events=True)],
-    [sg.Text("SMTP User"), sg.Input(key="-SMTPUSER-", size=(40, 1), enable_events=True)],
-    [sg.Text("SMTP Password"), sg.Input(key="-SMTPPASS-", password_char="*", size=(40, 1))],
-    [sg.Text("CC"), sg.Input(key="-CC-", size=(60, 1), enable_events=True)],
-    [sg.Text("BCC"), sg.Input(key="-BCC-", size=(60, 1), enable_events=True)],
-    [sg.Text("Reply-To"), sg.Input(key="-REPLYTO-", size=(60, 1), enable_events=True)],
+    [
+        sg.Text("Remetente (From)"),
+        sg.Input(key="-SENDER-", expand_x=True, enable_events=True),
+    ],
+    [
+        sg.Text("SMTP User"),
+        sg.Input(key="-SMTPUSER-", expand_x=True, enable_events=True),
+    ],
+    [
+        sg.Text("SMTP Password"),
+        sg.Input(key="-SMTPPASS-", password_char="*", expand_x=True),
+    ],
+    [sg.Text("CC"), sg.Input(key="-CC-", expand_x=True, enable_events=True)],
+    [sg.Text("BCC"), sg.Input(key="-BCC-", expand_x=True, enable_events=True)],
+    [sg.Text("Reply-To"), sg.Input(key="-REPLYTO-", expand_x=True, enable_events=True)],
     [sg.HorizontalSeparator()],
-    [sg.Text("Assunto (Jinja2)"), sg.Input(key="-SUBJECT-", size=(60, 1), enable_events=True)],
+    [
+        sg.Text("Assunto (Jinja2)"),
+        sg.Input(key="-SUBJECT-", expand_x=True, enable_events=True),
+    ],
     [
         sg.Text("Assunto por arquivo (.txt)"),
-        sg.Input(key="-SUBJECTFILE-", enable_events=True, size=(60, 1)),
+        sg.Input(key="-SUBJECTFILE-", enable_events=True, expand_x=True),
         sg.FileBrowse(
             key="-SUBJECTFILE-BROWSE-",
             file_types=(("Texto", "*.txt;*.jinja;*.j2"),),
+            button_text="Browse",
+            size=(10, 1),
         ),
     ],
     [
         sg.Text("Template HTML"),
-        sg.Input(key="-HTML-", enable_events=True, size=(60, 1)),
+        sg.Input(key="-HTML-", enable_events=True, expand_x=True),
         sg.FileBrowse(
             key="-HTML-BROWSE-",
             file_types=(("HTML", "*.html;*.htm;*.j2"),),
+            button_text="Browse",
+            size=(10, 1),
         ),
         sg.Button("Preview", key="-HTML-PREVIEW-"),
     ],
@@ -817,29 +908,48 @@ layout = [
             key="-PROGRESS-",
             visible=False,
             bar_color=("#1f77b4", "#e0e0e0"),
+            expand_x=True,
         ),
         sg.Text("Pronto", key="-STATUS-", size=(20, 1)),
         sg.Text("0/0", key="-COUNTER-", size=(10, 1)),
     ],
     [
-        sg.Button("Validar & Prévia", key="-VALIDATE-"),
-        sg.Button("Abrir última prévia", key="-OPEN-LAST-PREVIEW-"),
-        sg.Button("Enviar", key="-RUN-", bind_return_key=True, disabled=True),
-        sg.Button("Cancelar", key="-CANCEL-", disabled=True),
-        sg.Button("Sair", key="-EXIT-"),
+        sg.Button("Validar & Prévia", key="-VALIDATE-", size=(16, 1)),
+        sg.Button("Abrir última prévia", key="-OPEN-LAST-PREVIEW-", size=(18, 1)),
+        sg.Button(
+            "Enviar",
+            key="-RUN-",
+            size=(12, 1),
+            bind_return_key=True,
+            disabled=True,
+        ),
+        sg.Button("Cancelar", key="-CANCEL-", size=(12, 1), disabled=True),
+        sg.Button("Sair", key="-EXIT-", size=(8, 1)),
     ],
     [
         sg.Multiline(
             key="-LOG-",
-            size=(100, 20),
             autoscroll=True,
             write_only=True,
             font=("Consolas", 10),
+            expand_x=True,
+            expand_y=True,
+            reroute_stdout=False,
+            reroute_stderr=False,
         )
     ],
 ]
 
-window = sg.Window("Emaileria — Envio de E-mails", layout, finalize=True)
+window = sg.Window(
+    "Emaileria — Envio de E-mails",
+    layout,
+    size=(WIN_W, WIN_H),
+    resizable=True,
+    finalize=True,
+    location=(LOC_X, LOC_Y),
+    element_justification="left",
+    keep_on_top=False,
+)
 _update_interval_display(window, float(window["-INTERVAL-"].DefaultValue))
 window["-COUNTER-"].update("0/0")
 _apply_saved_settings(window)
@@ -869,6 +979,7 @@ while True:
     event, values = window.read(timeout=100)
     if event in (sg.WIN_CLOSED, "-EXIT-"):
         _save_settings(values)
+        save_window_geometry(window)
         break
 
     if event in _VALIDATION_RESET_EVENTS:
@@ -946,7 +1057,7 @@ while True:
             sg.popup_error("Nenhuma prévia foi gerada ainda.")
         else:
             STATE.last_preview_path = candidate
-            _open_preview_page(candidate, window=window)
+            open_preview_window(candidate)
         continue
 
     if event == "-RUN-":
