@@ -4,6 +4,7 @@ import os
 import queue
 import re
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -35,7 +36,20 @@ PROCESSING_PATTERN = re.compile(
 GLOBAL_PLACEHOLDERS = {"now", "hoje", "data_envio", "hora_envio"}
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-current_sheets: list[str] = []
+
+@dataclass
+class GuiState:
+    last_preview_path: Path | None = None
+    cancel_flag: bool = False
+    current_sheets: list[str] = field(default_factory=list)
+    progress_state: dict[str, int] = field(
+        default_factory=lambda: {"total": 0, "sent": 0}
+    )
+    validation_passed: bool = False
+    worker_thread: Optional[threading.Thread] = None
+
+
+STATE = GuiState()
 
 
 def _load_settings() -> dict[str, object]:
@@ -135,10 +149,6 @@ INTERACTIVE_KEYS = [
     "-EXIT-",
 ]
 
-progress_state: dict[str, int] = {"total": 0, "sent": 0}
-validation_passed = False
-last_preview_path: Path | None = None
-
 _VALIDATION_RESET_EVENTS = {
     "-EXCEL-",
     "-SHEET-",
@@ -171,8 +181,8 @@ def _set_controls_enabled(window: sg.Window, *, enabled: bool) -> None:
 
 
 def _update_counter_display(window: sg.Window, *, unknown_total: bool = False) -> None:
-    total = progress_state.get("total", 0)
-    sent = progress_state.get("sent", 0)
+    total = STATE.progress_state.get("total", 0)
+    sent = STATE.progress_state.get("sent", 0)
     if total == 0 and unknown_total:
         total_display = "?"
     else:
@@ -184,7 +194,7 @@ def _update_run_button_state(window: sg.Window) -> None:
     run_button = window.AllKeysDict.get("-RUN-")
     if run_button is None:
         return
-    should_enable = validation_passed
+    should_enable = STATE.validation_passed
     try:
         run_button.update(disabled=not should_enable)
     except TypeError:
@@ -262,8 +272,7 @@ def _find_latest_preview() -> Path | None:
 
 
 def _set_validation_state(window: sg.Window, *, passed: bool) -> None:
-    global validation_passed  # pylint: disable=global-statement
-    validation_passed = passed
+    STATE.validation_passed = passed
     _update_run_button_state(window)
 
 
@@ -271,8 +280,9 @@ def _set_running_state(window: sg.Window, *, running: bool) -> None:
     progress_bar = window["-PROGRESS-"]
     cancel_button = window["-CANCEL-"]
     if running:
-        progress_state["total"] = 0
-        progress_state["sent"] = 0
+        STATE.progress_state["total"] = 0
+        STATE.progress_state["sent"] = 0
+        STATE.cancel_flag = False
         _set_controls_enabled(window, enabled=False)
         window["-STATUS-"].update("Processando...")
         progress_bar.update(current_count=0, max=1, visible=True)
@@ -292,7 +302,8 @@ def _set_running_state(window: sg.Window, *, running: bool) -> None:
     window["-STATUS-"].update("Pronto")
     _set_controls_enabled(window, enabled=True)
     cancel_button.update(disabled=True)
-    if progress_state["total"] == 0:
+    STATE.cancel_flag = False
+    if STATE.progress_state["total"] == 0:
         window["-COUNTER-"].update("0/0")
     else:
         _update_counter_display(window)
@@ -310,7 +321,7 @@ def _apply_saved_settings(window: sg.Window) -> None:
             _update_sheet_combo(window, excel_path)
 
     sheet_value = str(settings.get("sheet", "") or "")
-    if sheet_value and sheet_value in current_sheets:
+    if sheet_value and sheet_value in STATE.current_sheets:
         window["-SHEET-"].update(value=sheet_value)
 
     html_path = str(settings.get("html", "") or "")
@@ -356,35 +367,42 @@ def _handle_progress_from_log(window: sg.Window, message: str) -> None:
     match = PROCESSING_PATTERN.search(message)
     if match:
         try:
-            progress_state["total"] = int(match.group("processed"))
+            STATE.progress_state["total"] = int(match.group("processed"))
         except (TypeError, ValueError):
-            progress_state["total"] = 0
-        progress_state["sent"] = 0
-        _update_counter_display(window, unknown_total=progress_state["total"] == 0)
-        if progress_state["total"] > 0:
+            STATE.progress_state["total"] = 0
+        STATE.progress_state["sent"] = 0
+        _update_counter_display(
+            window, unknown_total=STATE.progress_state["total"] == 0
+        )
+        if STATE.progress_state["total"] > 0:
             try:
                 progress_bar = window["-PROGRESS-"]
-                progress_bar.update(current_count=0, max=progress_state["total"], visible=True)
+                progress_bar.update(
+                    current_count=0,
+                    max=STATE.progress_state["total"],
+                    visible=True,
+                )
                 progress_bar.Widget.stop()
             except Exception:  # pylint: disable=broad-except
                 pass
         return
 
     if "Prepared email to" in message:
-        progress_state["sent"] = progress_state.get("sent", 0) + 1
+        STATE.progress_state["sent"] = STATE.progress_state.get("sent", 0) + 1
         if (
-            progress_state.get("total")
-            and progress_state["sent"] > progress_state.get("total", 0)
+            STATE.progress_state.get("total")
+            and STATE.progress_state["sent"]
+            > STATE.progress_state.get("total", 0)
         ):
-            progress_state["total"] = progress_state["sent"]
+            STATE.progress_state["total"] = STATE.progress_state["sent"]
         _update_counter_display(
             window,
-            unknown_total=progress_state.get("total", 0) == 0,
+            unknown_total=STATE.progress_state.get("total", 0) == 0,
         )
-        if progress_state.get("total", 0) > 0:
+        if STATE.progress_state.get("total", 0) > 0:
             try:
                 progress_bar = window["-PROGRESS-"]
-                progress_bar.update(current_count=progress_state["sent"])
+                progress_bar.update(current_count=STATE.progress_state["sent"])
             except Exception:  # pylint: disable=broad-except
                 pass
 
@@ -392,8 +410,7 @@ def _handle_progress_from_log(window: sg.Window, message: str) -> None:
 def _update_sheet_combo(window: sg.Window, file_path: str) -> None:
     sheet_element = window["-SHEET-"]
     sheet_element.update(values=[], value="", disabled=True)
-    global current_sheets  # pylint: disable=global-statement
-    current_sheets = []
+    STATE.current_sheets = []
     if not file_path:
         return
 
@@ -413,7 +430,7 @@ def _update_sheet_combo(window: sg.Window, file_path: str) -> None:
         return
 
     sheet_element.update(values=sheet_names, value=sheet_names[0], disabled=False)
-    current_sheets = sheet_names
+    STATE.current_sheets = sheet_names
 
 
 class QueueLogHandler(logging.Handler):
@@ -454,7 +471,7 @@ def _prepare_run_params(
 
     sheet_value_raw = str(values.get("-SHEET-", "") or "").strip()
     sheet_value = sheet_value_raw or None
-    if sheet_value and current_sheets and sheet_value not in current_sheets:
+    if sheet_value and STATE.current_sheets and sheet_value not in STATE.current_sheets:
         sg.popup_error(
             "A aba selecionada não foi encontrada. Recarregue a planilha e tente novamente."
         )
@@ -629,8 +646,7 @@ def _validate_and_preview(window: sg.Window, values: dict[str, object]) -> bool:
         sg.popup_error(f"Não foi possível criar a prévia: {exc}")
         return False
 
-    global last_preview_path  # pylint: disable=global-statement
-    last_preview_path = index_path
+    STATE.last_preview_path = index_path
     _open_preview_page(index_path, window=window)
     return True
 
@@ -639,8 +655,6 @@ def _start_worker(window: sg.Window, params: RunParams) -> None:
     if run_program is None:
         sg.popup_error("Função de execução indisponível. Verifique a instalação.")
         return
-
-    global worker_thread  # pylint: disable=global-statement
 
     if email_sender_module is not None and hasattr(email_sender_module, "reset_cancel_flag"):
         try:
@@ -673,8 +687,8 @@ def _start_worker(window: sg.Window, params: RunParams) -> None:
         else:
             log_queue.put(("RESULT", str(result_code)))
 
-    worker_thread = threading.Thread(target=_run, daemon=True)
-    worker_thread.start()
+    STATE.worker_thread = threading.Thread(target=_run, daemon=True)
+    STATE.worker_thread.start()
 
 
 def _show_html_quick_preview(html_path: str) -> None:
@@ -843,8 +857,6 @@ if not any(isinstance(handler, QueueLogHandler) for handler in root_logger.handl
     root_logger.addHandler(queue_handler)
 root_logger.setLevel(logging.INFO)
 
-worker_thread: Optional[threading.Thread] = None
-
 if IMPORT_ERROR is not None:
     append_log(
         window,
@@ -918,7 +930,7 @@ while True:
                 f"Detalhes: {IMPORT_ERROR}"
             )
             continue
-        if worker_thread is not None and worker_thread.is_alive():
+        if STATE.worker_thread is not None and STATE.worker_thread.is_alive():
             sg.popup_error("Já existe um envio em andamento. Aguarde a finalização.")
             continue
         if _validate_and_preview(window, values):
@@ -927,14 +939,13 @@ while True:
         continue
 
     if event == "-OPEN-LAST-PREVIEW-":
-        global last_preview_path  # pylint: disable=global-statement
-        candidate = last_preview_path
+        candidate = STATE.last_preview_path
         if candidate is None or not candidate.exists():
             candidate = _find_latest_preview()
         if candidate is None or not candidate.exists():
             sg.popup_error("Nenhuma prévia foi gerada ainda.")
         else:
-            last_preview_path = candidate
+            STATE.last_preview_path = candidate
             _open_preview_page(candidate, window=window)
         continue
 
@@ -946,7 +957,7 @@ while True:
                 f"Detalhes: {IMPORT_ERROR}"
             )
             continue
-        if worker_thread is not None and worker_thread.is_alive():
+        if STATE.worker_thread is not None and STATE.worker_thread.is_alive():
             sg.popup_error("Já existe um envio em andamento. Aguarde a finalização.")
             continue
         params = _prepare_run_params(values)
@@ -959,15 +970,20 @@ while True:
         continue
 
     if event == "-CANCEL-":
-        if worker_thread is not None and worker_thread.is_alive():
-            append_log(window, "[INFO] Cancelamento solicitado. Aguarde a finalização.\n")
-            if email_sender_module is not None and hasattr(
-                email_sender_module, "request_cancel"
-            ):
-                try:
-                    email_sender_module.request_cancel()
-                except Exception:  # pylint: disable=broad-except
-                    pass
+        if STATE.worker_thread is not None and STATE.worker_thread.is_alive():
+            if not STATE.cancel_flag:
+                append_log(
+                    window,
+                    "[INFO] Cancelamento solicitado. Aguarde a finalização.\n",
+                )
+                STATE.cancel_flag = True
+                if email_sender_module is not None and hasattr(
+                    email_sender_module, "request_cancel"
+                ):
+                    try:
+                        email_sender_module.request_cancel()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
             window["-CANCEL-"].update(disabled=True)
         else:
             window["-CANCEL-"].update(disabled=True)
@@ -980,10 +996,10 @@ while True:
                 _handle_progress_from_log(window, payload)
             elif tag == "ERROR":
                 append_log(window, payload, tag="ERR")
-                worker_thread = None
+                STATE.worker_thread = None
                 _set_running_state(window, running=False)
             elif tag == "RESULT":
-                worker_thread = None
+                STATE.worker_thread = None
                 _set_running_state(window, running=False)
                 try:
                     code = int(payload)
