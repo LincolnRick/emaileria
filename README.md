@@ -109,6 +109,10 @@ O assistente faz perguntas passo a passo sobre os arquivos envolvidos no envio, 
 
 A GUI permite configurar envios completos sem recorrer ao terminal. Depois de instalar as dependências (veja [Pré-requisitos](#pré-requisitos)), execute `python gui.py` na raiz do projeto. No Windows, também é possível abrir o arquivo com um duplo clique – o console exibirá os logs em tempo real.
 
+![Visão geral da GUI](docs/gui-overview.png)
+
+Clique em **Validar & Prévia** para abrir uma janela com os e-mails renderizados como serão recebidos. Se o preview não abrir na janela embutida, ele abrirá no navegador padrão automaticamente.
+
 ### Passo a passo rápido
 
 1. Selecione a planilha (**Planilha (XLSX/CSV)**). O seletor lista automaticamente os exemplos `examples/readme/leads_exemplo.xlsx` e outros arquivos recentes.
@@ -117,12 +121,13 @@ A GUI permite configurar envios completos sem recorrer ao terminal. Depois de in
 4. Informe o **Assunto (Jinja2)** e escolha o **Template HTML**. Os arquivos `examples/readme/assunto_exemplo.txt` e `examples/readme/corpo_exemplo.html` aparecem na lista de sugestões.
 5. Defina os campos opcionais **CC**, **BCC** e **Reply-To** com listas separadas por vírgula.
 6. Ajuste o comportamento do envio: mantenha **Dry-run** marcado para apenas renderizar os e-mails, escolha o **Log level** e utilize o **Intervalo entre envios (s)** para aplicar rate limit (0 a 2 segundos, padrão 0,75s).
-7. Clique em **Validar & Prévia** para carregar a planilha, verificar placeholders obrigatórios e visualizar três amostras renderizadas (assunto + trecho do corpo). Somente após uma validação bem-sucedida o botão **Enviar** é habilitado.
+7. Clique em **Validar & Prévia** para carregar a planilha, verificar placeholders obrigatórios e abrir uma janela com três amostras renderizadas exatamente como chegarão aos destinatários. Somente após uma validação bem-sucedida o botão **Enviar** é habilitado.
 8. Inicie o envio real (ou dry-run) com **Enviar**. A barra de progresso e o contador exibem a evolução, enquanto o botão **Cancelar** permite interromper com segurança.
 
 ### Recursos da janela
 
-* **Validar & Prévia**: garante que as colunas `email`, `tratamento` e `nome` existam, sinaliza placeholders ausentes (considerando os globais `now`, `hoje`, `data_envio`, `hora_envio`) e abre um resumo scrollável com três mensagens de exemplo.
+* **Validar & Prévia**: garante que as colunas `email`, `tratamento` e `nome` existam, sinaliza placeholders ausentes (considerando os globais `now`, `hoje`, `data_envio`, `hora_envio`) e gera uma página HTML com três cartões renderizados. A visualização usa uma janela embutida via pywebview; se o engine não estiver disponível, o arquivo abre automaticamente no navegador padrão.
+* **Abrir última prévia**: reabre a página HTML mais recente salva em `previews/`, permitindo comparar rapidamente versões renderizadas sem repetir a validação.
 * **Campos CC/BCC/Reply-To**: aceitam listas separadas por vírgula com validação básica, repassadas diretamente para o envio SMTP.
 * **Slider de intervalo**: define o tempo mínimo entre mensagens (0 a 2 segundos) e é respeitado inclusive nos reenvios via GUI.
 * **Barra de progresso + botão Cancelar**: exibem contagem de enviados/total e permitem abortar o envio via flag thread-safe, sem travamentos.
