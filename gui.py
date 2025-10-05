@@ -3,6 +3,9 @@ import logging
 import os
 import queue
 import re
+import smtplib
+import socket
+import ssl
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +63,9 @@ from emaileria.preview import build_preview_page, open_preview_window
 
 REQUIRED_COLUMNS = {"email", "tratamento", "nome"}
 SETTINGS_PATH = Path.home() / ".emaileria_gui.json"
+DEFAULT_SMTP_HOST = "smtp.gmail.com"
+DEFAULT_SMTP_PORT_SSL = 465
+DEFAULT_SMTP_PORT_STARTTLS = 587
 PROCESSING_PATTERN = re.compile(
     r"Processando\s+(?P<processed>\d+)\s+contatos.*total[^0-9]*(?P<total>\d+)",
     re.IGNORECASE,
@@ -117,6 +123,9 @@ def _save_settings(values: Mapping[str, object] | None) -> None:
         "sheet": str(values.get("-SHEET-", "") or ""),
         "sender": str(values.get("-SENDER-", "") or ""),
         "smtp_user": str(values.get("-SMTPUSER-", "") or ""),
+        "smtp_host": str(values.get("-SMTPHOST-", "") or ""),
+        "smtp_port": str(values.get("-SMTPPORT-", "") or ""),
+        "smtp_starttls": bool(values.get("-SMTPSTARTTLS-", False)),
         "log_level": str(values.get("-LOGLEVEL-", "INFO") or "INFO"),
         "dry_run": bool(values.get("-DRYRUN-", True)),
         "interval": float(values.get("-INTERVAL-", 0.75) or 0.0),
@@ -201,6 +210,231 @@ def _parse_email_list(raw_value: str) -> list[str]:
     return entries
 
 
+def _interpret_authentication_error_gui(
+    exc: smtplib.SMTPAuthenticationError,
+) -> tuple[str, list[str], str]:
+    if email_sender_module is not None:
+        interpret = getattr(email_sender_module, "_interpret_authentication_error", None)
+        if callable(interpret):  # pragma: no cover - depends on import
+            try:
+                message, hints, details = interpret(exc)
+                return str(message), list(hints or []), str(details or "")
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    code = exc.smtp_code or 0
+    raw_error = exc.smtp_error or b""
+    if isinstance(raw_error, bytes):
+        error_text = raw_error.decode("utf-8", errors="ignore")
+    else:
+        error_text = str(raw_error)
+    normalized = error_text.lower()
+
+    hints: list[str] = []
+    if code == 535:
+        message = "Usuário/senha não aceitos. Use Senha de app (2FA obrigatório)."
+        hints.append(
+            "Ative a verificação em duas etapas e gere uma Senha de app em Segurança → Senhas de app."
+        )
+    elif code in {534, 530}:
+        if "apps not secure" in normalized or "less secure" in normalized:
+            message = (
+                "Acesso bloqueado pelo Google. Use uma Senha de app (opção de 'apps menos seguros' foi descontinuada)."
+            )
+        else:
+            message = (
+                f"Autenticação bloqueada pelo Google (código {code}). Use uma Senha de app."
+            )
+        hints.append(
+            "Confirme que está usando uma Senha de app gerada em Gerenciar Conta → Segurança → Senhas de app."
+        )
+    else:
+        message = f"Falha na autenticação SMTP (código {code})."
+        if "5.7." in normalized and "google" in normalized:
+            hints.append(
+                "O Google está bloqueando o login. Gere uma Senha de app (2FA obrigatório)."
+            )
+
+    if "displayunlockcaptcha" in normalized or "unlockcaptcha" in normalized:
+        hints.append(
+            "Autorize o acesso visitando https://accounts.google.com/DisplayUnlockCaptcha e refaça o login."
+        )
+
+    if not hints:
+        hints.append(
+            "Use uma Senha de app do Gmail (Gerenciar Conta → Segurança → Senhas de app)."
+        )
+
+    return message, hints, error_text.strip()
+
+
+def _perform_smtp_login(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    *,
+    use_starttls: bool,
+    timeout: float = 30.0,
+) -> dict[str, object]:
+    method_name = "SMTP + STARTTLS" if use_starttls else "SMTP_SSL"
+    try:
+        if use_starttls:
+            with smtplib.SMTP(host, port, timeout=timeout) as client:
+                client.ehlo()
+                client.starttls()
+                client.ehlo()
+                client.login(username, password)
+        else:
+            with smtplib.SMTP_SSL(host, port, timeout=timeout) as client:
+                client.login(username, password)
+    except smtplib.SMTPAuthenticationError as exc:
+        message, hints, details = _interpret_authentication_error_gui(exc)
+        return {
+            "success": False,
+            "type": "auth",
+            "method": method_name,
+            "message": message,
+            "hints": hints,
+            "details": details,
+        }
+    except (
+        smtplib.SMTPConnectError,
+        smtplib.SMTPServerDisconnected,
+        smtplib.SMTPHeloError,
+        smtplib.SMTPDataError,
+        smtplib.SMTPNotSupportedError,
+        ssl.SSLError,
+        socket.timeout,
+        OSError,
+    ) as exc:
+        return {
+            "success": False,
+            "type": "network",
+            "method": method_name,
+            "message": str(exc),
+            "hints": [],
+            "details": str(exc),
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        return {
+            "success": False,
+            "type": "error",
+            "method": method_name,
+            "message": str(exc),
+            "hints": [],
+            "details": str(exc),
+        }
+
+    return {
+        "success": True,
+        "type": "ok",
+        "method": method_name,
+        "message": "OK",
+        "hints": [],
+        "details": "",
+    }
+
+
+def _test_smtp_credentials(window: sg.Window, values: Mapping[str, object]) -> None:
+    host_value = str(values.get("-SMTPHOST-", "") or "").strip() or DEFAULT_SMTP_HOST
+    use_starttls = bool(values.get("-SMTPSTARTTLS-", False))
+    port_default = DEFAULT_SMTP_PORT_STARTTLS if use_starttls else DEFAULT_SMTP_PORT_SSL
+    port_raw = str(values.get("-SMTPPORT-", "") or "").strip()
+    if port_raw:
+        try:
+            port_value = int(port_raw)
+        except ValueError:
+            sg.popup_error("Porta SMTP inválida. Informe um número inteiro positivo.")
+            return
+        if port_value <= 0:
+            sg.popup_error("Porta SMTP inválida. Informe um número inteiro positivo.")
+            return
+    else:
+        port_value = port_default
+
+    username = str(values.get("-SMTPUSER-", "") or "").strip()
+    if not username:
+        username = str(values.get("-SENDER-", "") or "").strip()
+    if not username:
+        sg.popup_error("Informe o SMTP User para testar as credenciais.")
+        return
+
+    password = str(values.get("-SMTPPASS-", "") or "").strip()
+    if not password:
+        env_password = os.getenv("SMTP_PASSWORD", "").strip()
+        password = env_password
+    if not password:
+        sg.popup_error("Informe a senha SMTP (Senha de app) ou defina a variável SMTP_PASSWORD.")
+        return
+
+    attempts: list[dict[str, object]] = []
+    summary_lines: list[str] = []
+    hints_collected: list[str] = []
+
+    first_result = _perform_smtp_login(
+        host_value,
+        port_value,
+        username,
+        password,
+        use_starttls=use_starttls,
+    )
+    attempts.append({"host": host_value, "port": port_value, **first_result})
+
+    if not first_result.get("success") and first_result.get("type") == "network":
+        fallback_use_starttls = not use_starttls
+        fallback_port = (
+            DEFAULT_SMTP_PORT_STARTTLS if fallback_use_starttls else DEFAULT_SMTP_PORT_SSL
+        )
+        fallback_result = _perform_smtp_login(
+            host_value,
+            fallback_port,
+            username,
+            password,
+            use_starttls=fallback_use_starttls,
+        )
+        attempts.append(
+            {
+                "host": host_value,
+                "port": fallback_port,
+                **fallback_result,
+            }
+        )
+
+    overall_success = False
+    for attempt in attempts:
+        method_name = str(attempt.get("method", "SMTP"))
+        host = attempt.get("host", host_value)
+        port = attempt.get("port", port_value)
+        if attempt.get("success"):
+            status_text = "OK"
+            overall_success = True
+        else:
+            error_message = str(attempt.get("message") or "Falha desconhecida")
+            details = str(attempt.get("details") or "")
+            if details and details != error_message:
+                status_text = f"Erro: {error_message} (detalhes: {details})"
+            else:
+                status_text = f"Erro: {error_message}"
+            hints_collected.extend(str(hint) for hint in attempt.get("hints", []) if hint)
+        summary_lines.append(f"{method_name} em {host}:{port} — {status_text}")
+
+    if hints_collected:
+        unique_hints: list[str] = []
+        for hint in hints_collected:
+            if hint not in unique_hints:
+                unique_hints.append(hint)
+        summary_lines.append("")
+        summary_lines.append("Dicas:")
+        summary_lines.extend(f"• {hint}" for hint in unique_hints)
+
+    message_text = "\n".join(summary_lines)
+
+    if overall_success:
+        sg.popup_ok(message_text, title="Teste de credenciais SMTP")
+    else:
+        sg.popup_error(message_text, title="Teste de credenciais SMTP")
+
 def _update_interval_display(window: sg.Window, value: float) -> None:
     window["-INTERVAL-LABEL-"].update(f"{value:.2f}s")
 
@@ -212,6 +446,10 @@ INTERACTIVE_KEYS = [
     "-SENDER-",
     "-SMTPUSER-",
     "-SMTPPASS-",
+    "-SMTPHOST-",
+    "-SMTPPORT-",
+    "-SMTPSTARTTLS-",
+    "-SMTPTEST-",
     "-CC-",
     "-BCC-",
     "-REPLYTO-",
@@ -235,6 +473,9 @@ _VALIDATION_RESET_EVENTS = {
     "-SHEET-",
     "-SENDER-",
     "-SMTPUSER-",
+    "-SMTPHOST-",
+    "-SMTPPORT-",
+    "-SMTPSTARTTLS-",
     "-SUBJECT-",
     "-SUBJECTFILE-",
     "-HTML-",
@@ -372,6 +613,28 @@ def _apply_saved_settings(window: sg.Window) -> None:
     smtp_user = str(settings.get("smtp_user", "") or "")
     if smtp_user:
         window["-SMTPUSER-"].update(smtp_user)
+
+    smtp_host = str(settings.get("smtp_host", "") or "").strip()
+    if not smtp_host:
+        smtp_host = DEFAULT_SMTP_HOST
+    window["-SMTPHOST-"].update(smtp_host)
+
+    starttls_setting = settings.get("smtp_starttls")
+    use_starttls = bool(starttls_setting) if isinstance(starttls_setting, bool) else bool(starttls_setting)
+    window["-SMTPSTARTTLS-"].update(use_starttls)
+
+    smtp_port_setting = settings.get("smtp_port")
+    if isinstance(smtp_port_setting, (int, float)):
+        smtp_port_value = str(int(smtp_port_setting))
+    else:
+        smtp_port_value = str(smtp_port_setting or "").strip()
+    if not smtp_port_value:
+        smtp_port_value = (
+            str(DEFAULT_SMTP_PORT_STARTTLS)
+            if use_starttls
+            else str(DEFAULT_SMTP_PORT_SSL)
+        )
+    window["-SMTPPORT-"].update(smtp_port_value)
 
     cc_value = str(settings.get("cc", "") or "")
     bcc_value = str(settings.get("bcc", "") or "")
@@ -546,6 +809,24 @@ def _prepare_run_params(
     smtp_user_input = str(values.get("-SMTPUSER-", "") or "").strip()
     smtp_user_value = smtp_user_input or sender_value
 
+    smtp_host_value = str(values.get("-SMTPHOST-", "") or "").strip() or DEFAULT_SMTP_HOST
+    use_starttls_value = bool(values.get("-SMTPSTARTTLS-", False))
+    smtp_port_raw = str(values.get("-SMTPPORT-", "") or "").strip()
+    default_port = (
+        DEFAULT_SMTP_PORT_STARTTLS if use_starttls_value else DEFAULT_SMTP_PORT_SSL
+    )
+    if smtp_port_raw:
+        try:
+            smtp_port_value = int(smtp_port_raw)
+        except ValueError:
+            sg.popup_error("Porta SMTP inválida. Informe um número inteiro positivo.")
+            return None
+        if smtp_port_value <= 0:
+            sg.popup_error("Porta SMTP inválida. Informe um número inteiro positivo.")
+            return None
+    else:
+        smtp_port_value = default_port
+
     if not dry_run_value:
         if not sender_value:
             sg.popup_error("Informe o remetente (From).")
@@ -595,6 +876,9 @@ def _prepare_run_params(
         smtp_password=password_input,
         subject_template=subject_template,
         body_html=body_html,
+        smtp_host=smtp_host_value,
+        smtp_port=smtp_port_value,
+        use_starttls=use_starttls_value,
         dry_run=dry_run_value,
         log_level=log_level_value,
         cc=cc_list or None,
@@ -704,6 +988,12 @@ def _start_worker(window: sg.Window, params: RunParams) -> None:
     append_log(window, f"[INFO] Sheet: {params.sheet or '(padrão)'}\n")
     append_log(window, f"[INFO] Remetente: {params.sender or '(não informado)'}\n")
     append_log(window, f"[INFO] SMTP User: {params.smtp_user or '(não informado)'}\n")
+    append_log(window, f"[INFO] SMTP Host: {params.smtp_host}\n")
+    append_log(window, f"[INFO] SMTP Porta: {params.smtp_port}\n")
+    append_log(
+        window,
+        f"[INFO] SMTP Método: {'STARTTLS' if params.use_starttls else 'SSL'}\n",
+    )
     if params.cc:
         append_log(window, f"[INFO] CC: {', '.join(params.cc)}\n")
     if params.bcc:
@@ -774,8 +1064,38 @@ layout = [
         sg.Input(key="-SMTPUSER-", expand_x=True, enable_events=True),
     ],
     [
-        sg.Text("SMTP Password"),
-        sg.Input(key="-SMTPPASS-", password_char="*", expand_x=True),
+        sg.Text(
+            "SMTP Password — Senha de app (recomendado)",
+            tooltip="Gmail exige Senha de app (16 dígitos). Vá em Gerenciar Conta → Segurança → Senhas de app.",
+        ),
+        sg.Input(
+            key="-SMTPPASS-",
+            password_char="*",
+            expand_x=True,
+            tooltip="Gmail exige Senha de app (16 dígitos). Vá em Gerenciar Conta → Segurança → Senhas de app.",
+        ),
+    ],
+    [
+        sg.Text("SMTP Host"),
+        sg.Input(
+            key="-SMTPHOST-",
+            expand_x=True,
+            enable_events=True,
+            default_text=DEFAULT_SMTP_HOST,
+        ),
+        sg.Text("Porta"),
+        sg.Input(
+            key="-SMTPPORT-",
+            size=(6, 1),
+            enable_events=True,
+            default_text=str(DEFAULT_SMTP_PORT_SSL),
+        ),
+        sg.Checkbox(
+            "Usar STARTTLS",
+            key="-SMTPSTARTTLS-",
+            enable_events=True,
+        ),
+        sg.Button("Testar credenciais", key="-SMTPTEST-", size=(18, 1)),
     ],
     [sg.Text("CC"), sg.Input(key="-CC-", expand_x=True, enable_events=True)],
     [sg.Text("BCC"), sg.Input(key="-BCC-", expand_x=True, enable_events=True)],
@@ -932,7 +1252,28 @@ while True:
     if event == "-SHEET-":
         _save_settings(values)
 
-    if event in {"-SENDER-", "-SMTPUSER-", "-CC-", "-BCC-", "-REPLYTO-"}:
+    if event in {
+        "-SENDER-",
+        "-SMTPUSER-",
+        "-SMTPHOST-",
+        "-SMTPPORT-",
+        "-CC-",
+        "-BCC-",
+        "-REPLYTO-",
+    }:
+        _save_settings(values)
+
+    if event == "-SMTPSTARTTLS-":
+        use_starttls = bool(values.get("-SMTPSTARTTLS-", False))
+        current_port = str(values.get("-SMTPPORT-", "") or "").strip()
+        if current_port in {"", str(DEFAULT_SMTP_PORT_SSL), str(DEFAULT_SMTP_PORT_STARTTLS)}:
+            new_port = (
+                str(DEFAULT_SMTP_PORT_STARTTLS)
+                if use_starttls
+                else str(DEFAULT_SMTP_PORT_SSL)
+            )
+            window["-SMTPPORT-"].update(new_port)
+            values["-SMTPPORT-"] = new_port
         _save_settings(values)
 
     if event == "-HTML-":
@@ -951,6 +1292,11 @@ while True:
             slider_value = 0.75
         _update_interval_display(window, slider_value)
         _save_settings(values)
+
+    if event == "-SMTPTEST-":
+        _test_smtp_credentials(window, values)
+        _save_settings(values)
+        continue
 
     if event == "-SUBJECTFILE-":
         subject_file_path = str(values.get("-SUBJECTFILE-", "") or "").strip()
@@ -1157,6 +1503,11 @@ while True:
                     code = int(payload)
                 except (TypeError, ValueError):
                     code = 1
+                auth_exit_code = 5
+                if email_sender_module is not None:
+                    auth_exit_code = int(
+                        getattr(email_sender_module, "AUTHENTICATION_ERROR_EXIT_CODE", 5)
+                    )
                 if code == 0:
                     append_log(
                         window,
@@ -1164,6 +1515,16 @@ while True:
                     )
                 elif code == 130:
                     append_log(window, "\n[INFO] Execução cancelada pelo usuário.\n")
+                elif code == auth_exit_code:
+                    append_log(
+                        window,
+                        "\n[ERR] Falha na autenticação SMTP detectada.\n",
+                        tag="ERR",
+                    )
+                    sg.popup_error(
+                        "Falha na autenticação. Clique em Testar credenciais para corrigir.",
+                        title="Erro de autenticação SMTP",
+                    )
                 else:
                     append_log(
                         window,

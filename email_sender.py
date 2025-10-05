@@ -7,6 +7,7 @@ import csv
 import datetime as _dt
 import logging
 import os
+import smtplib
 import sqlite3
 import threading
 import time
@@ -30,6 +31,9 @@ _CSV_LOG_PATH = _LOG_DIR / "envios.csv"
 _SQLITE_LOG_PATH = _LOG_DIR / "emaileria.db"
 _CSV_HEADERS = ["timestamp", "email", "assunto", "status", "tentativas", "erro"]
 
+AUTHENTICATION_ERROR_EXIT_CODE = 5
+"""Código de saída usado quando ocorre falha de autenticação SMTP."""
+
 
 @dataclass
 class RunParams:
@@ -42,6 +46,9 @@ class RunParams:
     smtp_password: str
     subject_template: str
     body_html: str
+    smtp_host: str = config.SMTP_HOST
+    smtp_port: int = config.SMTP_PORT
+    use_starttls: bool = False
     dry_run: bool = True
     limit: int | None = None
     offset: int | None = None
@@ -218,6 +225,55 @@ def _mask_password(value: str | None) -> str:
     return "*" * 8
 
 
+def _interpret_authentication_error(
+    exc: smtplib.SMTPAuthenticationError,
+) -> tuple[str, list[str], str]:
+    code = exc.smtp_code or 0
+    raw_error = exc.smtp_error or b""
+    if isinstance(raw_error, bytes):
+        error_text = raw_error.decode("utf-8", errors="ignore")
+    else:
+        error_text = str(raw_error)
+    normalized = error_text.lower()
+
+    hints: list[str] = []
+    if code == 535:
+        message = "Usuário/senha não aceitos. Use Senha de app (2FA obrigatório)."
+        hints.append(
+            "Ative a verificação em duas etapas e gere uma Senha de app em Segurança → Senhas de app."
+        )
+    elif code in {534, 530}:
+        if "apps not secure" in normalized or "less secure" in normalized:
+            message = (
+                "Acesso bloqueado pelo Google. Use uma Senha de app (opção de 'apps menos seguros' foi descontinuada)."
+            )
+        else:
+            message = (
+                f"Autenticação bloqueada pelo Google (código {code}). Use uma Senha de app."
+            )
+        hints.append(
+            "Confirme que está usando uma Senha de app gerada em Gerenciar Conta → Segurança → Senhas de app."
+        )
+    else:
+        message = f"Falha na autenticação SMTP (código {code})."
+        if "5.7." in normalized and "google" in normalized:
+            hints.append(
+                "O Google está bloqueando o login. Gere uma Senha de app (2FA obrigatório)."
+            )
+
+    if "displayunlockcaptcha" in normalized or "unlockcaptcha" in normalized:
+        hints.append(
+            "Autorize o acesso visitando https://accounts.google.com/DisplayUnlockCaptcha e refaça o login."
+        )
+
+    if not hints:
+        hints.append(
+            "Use uma Senha de app do Gmail (Gerenciar Conta → Segurança → Senhas de app)."
+        )
+
+    return message, hints, error_text.strip()
+
+
 def request_cancel() -> None:
     """Sinaliza para que o processamento seja cancelado."""
 
@@ -236,6 +292,9 @@ def _log_configuration(params: RunParams, total: int) -> None:
     logging.info("Sheet: %s", params.sheet or "(padrão)")
     logging.info("Remetente: %s", params.sender or "(não informado)")
     logging.info("SMTP User: %s", params.smtp_user or params.sender or "(não informado)")
+    logging.info("SMTP Host: %s", params.smtp_host)
+    logging.info("SMTP Porta: %s", params.smtp_port)
+    logging.info("SMTP Método: %s", "STARTTLS" if params.use_starttls else "SSL")
     logging.info("CC: %s", ", ".join(params.cc or []) or "(nenhum)")
     logging.info("BCC: %s", ", ".join(params.bcc or []) or "(nenhum)")
     logging.info("Reply-To: %s", params.reply_to or "(nenhum)")
@@ -286,11 +345,12 @@ def _send_real(params: RunParams, records: list[dict[str, object]]) -> int:
 
     try:
         with SMTPProvider(
-            config.SMTP_HOST,
-            config.SMTP_PORT,
+            params.smtp_host,
+            params.smtp_port,
             smtp_user,
             smtp_password,
             timeout=config.SMTP_TIMEOUT,
+            use_starttls=params.use_starttls,
         ) as provider:
             results = send_messages(
                 sender=params.sender,
@@ -306,13 +366,26 @@ def _send_real(params: RunParams, records: list[dict[str, object]]) -> int:
                 reply_to=params.reply_to,
                 cancel_event=_CANCEL_EVENT,
             )
+    except smtplib.SMTPAuthenticationError as exc:
+        message, hints, details = _interpret_authentication_error(exc)
+        logging.error(message)
+        for hint in hints:
+            logging.error("Dica: %s", hint)
+        if details:
+            logging.debug("Detalhes SMTP: %s", details)
+        return AUTHENTICATION_ERROR_EXIT_CODE
     except TemplateRenderingError as exc:
         logging.error(str(exc))
         return 1
     except SystemExit as exc:  # pragma: no cover - compatibilidade antiga
         return int(exc.code or 1)
     except Exception as exc:  # pragma: no cover - network/authentication issues
-        logging.error("Falha ao estabelecer conexão SMTP: %s", exc)
+        logging.error(
+            "Falha ao estabelecer conexão SMTP em %s:%s: %s",
+            params.smtp_host,
+            params.smtp_port,
+            exc,
+        )
         return 1
 
     _persist_results(results)
@@ -531,6 +604,7 @@ __all__ = [
     "load_contacts",
     "request_cancel",
     "reset_cancel_flag",
+    "AUTHENTICATION_ERROR_EXIT_CODE",
 ]
 
 

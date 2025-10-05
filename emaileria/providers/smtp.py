@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class SMTPProvider(EmailProvider):
-    """Email provider that sends messages using SMTP over SSL."""
+    """Email provider that sends messages using SMTP over SSL or STARTTLS."""
 
     def __init__(
         self,
@@ -23,13 +23,15 @@ class SMTPProvider(EmailProvider):
         password: str,
         *,
         timeout: Optional[int] = None,
+        use_starttls: bool = False,
     ) -> None:
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.timeout = timeout
-        self._smtp: smtplib.SMTP_SSL | None = None
+        self.use_starttls = use_starttls
+        self._smtp: smtplib.SMTP | smtplib.SMTP_SSL | None = None
 
     def __enter__(self) -> "SMTPProvider":
         self._ensure_connection()
@@ -38,11 +40,18 @@ class SMTPProvider(EmailProvider):
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _ensure_connection(self) -> smtplib.SMTP_SSL:
+    def _ensure_connection(self) -> smtplib.SMTP:
         if self._smtp is None:
             logger.info("Connecting to %s:%s as %s", self.host, self.port, self.username)
-            self._smtp = smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout)
-            self._smtp.login(self.username, self.password)
+            if self.use_starttls:
+                smtp = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            else:
+                smtp = smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout)
+            smtp.login(self.username, self.password)
+            self._smtp = smtp
         return self._smtp
 
     def _extract_recipients(self, message: Message) -> list[str]:
